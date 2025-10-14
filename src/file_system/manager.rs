@@ -1,5 +1,8 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use crate::casc::CascStorage;
+use anyhow::Result;
 
 /// Type of file operation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +44,8 @@ pub struct FileStatus {
 /// File manager that tracks all file operations
 pub struct FileManager {
     files: HashMap<String, FileStatus>,
+    casc_storage: Option<Arc<CascStorage>>,
+    output_path: Option<PathBuf>,
 }
 
 impl FileManager {
@@ -48,7 +53,58 @@ impl FileManager {
     pub fn new() -> Self {
         Self {
             files: HashMap::new(),
+            casc_storage: None,
+            output_path: None,
         }
+    }
+    
+    /// Set the CASC storage for extracting game files
+    pub fn set_casc_storage(&mut self, storage: Arc<CascStorage>) {
+        self.casc_storage = Some(storage);
+    }
+    
+    /// Set the output path for extracted files
+    pub fn set_output_path<P: Into<PathBuf>>(&mut self, path: P) {
+        self.output_path = Some(path.into());
+    }
+    
+    /// Extract a file from CASC storage if needed
+    /// Returns the path to the extracted file
+    pub async fn ensure_extracted(&mut self, file_path: &str, mod_id: &str) -> Result<PathBuf> {
+        let normalized = Self::normalize_path(file_path);
+        
+        // Check if already extracted
+        if self.is_extracted(&normalized) {
+            if let Some(output_path) = &self.output_path {
+                let file_path = output_path.join(&normalized);
+                if file_path.exists() {
+                    return Ok(file_path);
+                }
+            }
+        }
+        
+        // Extract from CASC
+        if let Some(storage) = &self.casc_storage {
+            if let Some(output_path) = &self.output_path {
+                let dest_path = output_path.join(&normalized);
+                
+                // Create parent directory
+                if let Some(parent) = dest_path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                
+                // Extract file - use original path for CASC (not normalized)
+                // CASC needs backslashes, not forward slashes
+                storage.extract_file(file_path, &dest_path)?;
+                
+                // Record extraction
+                self.record_extract(&normalized, mod_id);
+                
+                return Ok(dest_path);
+            }
+        }
+        
+        Err(anyhow::anyhow!("CASC storage not configured or file not found: {}", file_path))
     }
 
     /// Get or create file status for a given path

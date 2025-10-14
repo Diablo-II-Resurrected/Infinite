@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use infinite::cli::Cli;
+use infinite::casc::CascStorage;
 use infinite::file_system::FileManager;
 use infinite::mod_manager::ModLoader;
 use infinite::runtime::{Context, ModExecutor};
@@ -77,7 +78,22 @@ async fn install_mods(
     println!("📦 Found {} mod(s)\n", mods.len());
 
     // Create shared file manager
-    let file_manager = Arc::new(RwLock::new(FileManager::new()));
+    let mut file_manager = FileManager::new();
+    
+    // Try to open CASC storage
+    match CascStorage::open(game_path) {
+        Ok(casc) => {
+            tracing::info!("CASC storage opened successfully");
+            file_manager.set_casc_storage(Arc::new(casc));
+            file_manager.set_output_path(output_path);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to open CASC storage: {}. File extraction will be disabled.", e);
+            tracing::warn!("Make sure the game path is correct and the game is installed.");
+        }
+    }
+    
+    let file_manager = Arc::new(RwLock::new(file_manager));
 
     // Create mod executor
     let executor = ModExecutor::new()?;

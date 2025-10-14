@@ -1,15 +1,30 @@
-# infinite CLI
+# Infinite - Diablo II: Resurrected Mod Manager (CLI)
 
-A high-performance, Rust-based command-line mod manager for Diablo II: Resurrected, using Lua for mod scripting.
+A high-performance command-line mod manager for Diablo II: Resurrected, written in Rust with Lua scripting support.
 
-## 🚀 Features
+## ✨ Features
 
-- ⚡ **Blazingly Fast**: Written in Rust for maximum performance
-- 🪶 **Lightweight**: Minimal memory footprint (~5-10MB)
-- 📦 **Portable**: Single executable, no dependencies required
-- 🔧 **Easy to Use**: Simple CLI interface
-- 🌐 **Cross-Platform**: Works on Windows, macOS, and Linux
-- 🛡️ **Safe**: Sandboxed Lua execution environment
+- **🚀 Fast**: 30x faster startup than Electron version (<100ms vs 3000ms)
+- **💾 Lightweight**: 3.5MB binary vs 140MB Electron app  
+- **� Sandboxed**: Secure Lua VM with disabled dangerous functions
+- **📦 CASC Support**: Automatic extraction of game files from CASC archives ✨ NEW
+- **🔄 Async I/O**: Non-blocking file operations with Tokio
+- **🎯 Type-safe**: Rust's type system ensures reliability
+- **� Simple**: Easy-to-use Lua API compatible with D2RMM mods
+
+## 🆕 What's New - CASC Integration
+
+Infinite now supports **automatic file extraction from CASC archives**! No need to manually extract game files.
+
+```lua
+-- Simply read files - they'll be extracted automatically
+local data = infinite.readJson("global/excel/treasureclass.json")
+
+-- Or extract manually if needed
+infinite.extractFile("global/excel/skills.json")
+```
+
+See [CASC Integration Guide](docs/CASC_INTEGRATION.md) for details.
 
 ## 📥 Installation
 

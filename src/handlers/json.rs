@@ -11,10 +11,14 @@ impl JsonHandler {
             .await
             .context("Failed to read JSON file")?;
 
+        // D2R's JSON files may have UTF-8 BOM
+        // Remove BOM if present
+        let content = content.trim_start_matches('\u{FEFF}');
+
         // D2R's JSON files may have comments and other non-standard features
         // For now, we use standard JSON parsing
         // TODO: Implement lenient JSON parser for D2R compatibility
-        let value: serde_json::Value = serde_json::from_str(&content)
+        let value: serde_json::Value = serde_json::from_str(content)
             .context("Failed to parse JSON")?;
 
         Ok(value)

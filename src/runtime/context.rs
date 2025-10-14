@@ -44,12 +44,10 @@ impl Context {
     pub async fn read_json(&self, file_path: &str) -> Result<serde_json::Value> {
         let mut fm = self.file_manager.write().await;
 
-        // Try to extract file if needed
-        fm.extract_if_needed(file_path, &self.game_path, &self.output_path)
-            .await?;
+        // Extract file from CASC if needed
+        let full_path = fm.ensure_extracted(file_path, &self.mod_id).await?;
 
         // Read the file
-        let full_path = self.output_path.join(file_path);
         let value = JsonHandler::read(&full_path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read JSON file '{}': {}", file_path, e))?;
@@ -84,12 +82,10 @@ impl Context {
     pub async fn read_tsv(&self, file_path: &str) -> Result<Vec<Vec<String>>> {
         let mut fm = self.file_manager.write().await;
 
-        // Try to extract file if needed
-        fm.extract_if_needed(file_path, &self.game_path, &self.output_path)
-            .await?;
+        // Extract file from CASC if needed
+        let full_path = fm.ensure_extracted(file_path, &self.mod_id).await?;
 
         // Read the file
-        let full_path = self.output_path.join(file_path);
         let rows = TsvHandler::read(&full_path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read TSV file '{}': {}", file_path, e))?;
@@ -124,12 +120,10 @@ impl Context {
     pub async fn read_txt(&self, file_path: &str) -> Result<String> {
         let mut fm = self.file_manager.write().await;
 
-        // Try to extract file if needed
-        fm.extract_if_needed(file_path, &self.game_path, &self.output_path)
-            .await?;
+        // Extract file from CASC if needed
+        let full_path = fm.ensure_extracted(file_path, &self.mod_id).await?;
 
         // Read the file
-        let full_path = self.output_path.join(file_path);
         let content = TextHandler::read(&full_path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read text file '{}': {}", file_path, e))?;
@@ -190,6 +184,24 @@ impl Context {
         let mut fm = self.file_manager.write().await;
         fm.record_write(dst, &self.mod_id);
 
+        Ok(())
+    }
+    
+    /// Extract a file from CASC storage
+    /// This ensures the file is available for reading
+    pub async fn extract_file(&self, file_path: &str) -> Result<()> {
+        if self.dry_run {
+            tracing::info!("[DRY RUN] Would extract: {}", file_path);
+            return Ok(());
+        }
+        
+        let mut fm = self.file_manager.write().await;
+        
+        // Use the ensure_extracted method from FileManager
+        let extracted_path = fm.ensure_extracted(file_path, &self.mod_id).await?;
+        
+        tracing::info!("Extracted: {} -> {}", file_path, extracted_path.display());
+        
         Ok(())
     }
 }

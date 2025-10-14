@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::collections::HashMap;
 
 /// Handler for TSV (Tab-Separated Values) files
 pub struct TsvHandler;
@@ -15,6 +16,8 @@ impl TsvHandler {
             .delimiter(b'\t')
             .has_headers(false)
             .flexible(true) // Allow variable number of fields
+            .quoting(true)  // 启用引号处理
+            .double_quote(true)  // 支持双引号转义
             .from_reader(content.as_bytes());
 
         let mut rows = Vec::new();
@@ -37,19 +40,31 @@ impl TsvHandler {
                 .context("Failed to create parent directory")?;
         }
 
-        let mut writer = csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .has_headers(false)
-            .from_path(path)
-            .context("Failed to create TSV writer")?;
-
+        // D2R TSV 文件需要特殊处理:
+        // - 包含逗号的字段需要用双引号包围
+        // - 这是 D2R 游戏引擎的要求
+        let mut content = String::new();
+        
         for row in data {
-            writer
-                .write_record(row)
-                .context("Failed to write TSV record")?;
+            let formatted_row: Vec<String> = row
+                .iter()
+                .map(|field| {
+                    // 如果字段包含逗号,用双引号包围
+                    if field.contains(',') {
+                        format!("\"{}\"", field)
+                    } else {
+                        field.clone()
+                    }
+                })
+                .collect();
+            
+            content.push_str(&formatted_row.join("\t"));
+            content.push('\n');
         }
 
-        writer.flush().context("Failed to flush TSV writer")?;
+        tokio::fs::write(path, content)
+            .await
+            .context("Failed to write TSV file")?;
 
         Ok(())
     }
