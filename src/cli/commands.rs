@@ -29,9 +29,9 @@ pub enum Commands {
         #[arg(short = 'l', long, conflicts_with = "mods_path")]
         mod_list: Option<String>,
 
-        /// Path to the output directory
+        /// Path to the output directory (defaults to <game_path>/Mods/Infinite/Infinite.mpq/data)
         #[arg(short, long)]
-        output_path: String,
+        output_path: Option<String>,
 
         /// Dry run (don't write files)
         #[arg(long)]

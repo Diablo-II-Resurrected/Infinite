@@ -40,7 +40,11 @@ async fn main() -> Result<()> {
             dry_run,
             clear_cache,
         } => {
-            install_mods(&game_path, mods_path.as_deref(), mod_list.as_deref(), &output_path, dry_run, clear_cache).await?;
+            // Use default output path if not specified
+            let output = output_path.unwrap_or_else(|| {
+                format!("{}/Mods/Infinite/Infinite.mpq/data", game_path)
+            });
+            install_mods(&game_path, mods_path.as_deref(), mod_list.as_deref(), &output, dry_run, clear_cache).await?;
         }
         infinite::cli::commands::Commands::List { mods_path } => {
             list_mods(&mods_path).await?;
@@ -233,6 +237,41 @@ async fn install_mods(
             );
         } else {
             println!("{} All modifications written to disk", "✅".bright_green());
+        }
+    }
+
+    // Generate modinfo.json in parent directory of output_path
+    if !dry_run {
+        if let Some(parent_dir) = std::path::Path::new(output_path).parent() {
+            let modinfo_path = parent_dir.join("modinfo.json");
+            let modinfo_content = serde_json::json!({
+                "name": "Infinite",
+                "savepath": "Infinite/"
+            });
+
+            match std::fs::create_dir_all(parent_dir) {
+                Ok(_) => {
+                    match std::fs::write(&modinfo_path, serde_json::to_string_pretty(&modinfo_content)?) {
+                        Ok(_) => {
+                            println!("{} Generated modinfo.json at: {}", "✅".bright_green(), modinfo_path.display());
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "{} Failed to write modinfo.json: {}",
+                                "⚠️".bright_yellow(),
+                                e.to_string().bright_red()
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{} Failed to create directory for modinfo.json: {}",
+                        "⚠️".bright_yellow(),
+                        e.to_string().bright_red()
+                    );
+                }
+            }
         }
     }
 

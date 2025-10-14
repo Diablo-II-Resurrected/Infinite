@@ -4,13 +4,22 @@ A high-performance command-line mod manager for Diablo II: Resurrected, written 
 
 ## ✨ Features
 
+### CLI
 - **🚀 Fast**: 30x faster startup than Electron version (<100ms vs 3000ms)
 - **💾 Lightweight**: 3.5MB binary vs 140MB Electron app  
-- **� Sandboxed**: Secure Lua VM with disabled dangerous functions
+- **🔒 Sandboxed**: Secure Lua VM with disabled dangerous functions
 - **📦 CASC Support**: Automatic extraction of game files from CASC archives ✨ NEW
-- **🔄 Async I/O**: Non-blocking file operations with Tokio
+- **📝 Auto modinfo.json**: Automatically generates D2R mod metadata ✨ NEW
+- ** Async I/O**: Non-blocking file operations with Tokio
 - **🎯 Type-safe**: Rust's type system ensures reliability
-- **� Simple**: Easy-to-use Lua API compatible with D2RMM mods
+- **💡 Simple**: Easy-to-use Lua API compatible with D2RMM mods
+
+### GUI
+- **🖥️ Native UI**: Fast and responsive native GUI built with egui
+- **🌏 Chinese Support**: Full Chinese language support with proper font rendering
+- **💾 Auto-Save**: Remembers your game path and mod list ✨ NEW
+- **🎮 Easy to Use**: Simple drag-free interface for managing mods
+- **🔄 Real-time**: Live status updates and progress feedback
 
 ## 🆕 What's New - CASC Integration
 
@@ -43,8 +52,8 @@ The binary will be available at `target/release/infinite` (or `infinite.exe` on 
 ```bash
 infinite install \
     --game-path "C:/Program Files (x86)/Diablo II Resurrected" \
-    --mods-path "./mods" \
-    --output-path "./output"
+    --mods-path "./mods"
+    # Output path is optional
 ```
 
 ### Install Mods from List File ✨ NEW
@@ -64,8 +73,8 @@ Then install:
 ```bash
 infinite install \
     --game-path "C:/Program Files (x86)/Diablo II Resurrected" \
-    --mod-list "./mods.txt" \
-    --output-path "./output"
+    --mod-list "./mods.txt"
+    # Output path is optional - defaults to <game_path>/Mods/Infinite/Infinite.mpq/data
 ```
 
 See [Mod List Guide](docs/MOD_LIST.md) for detailed documentation.
