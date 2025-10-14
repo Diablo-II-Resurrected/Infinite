@@ -1,0 +1,15 @@
+{
+  "name": "Simple Text Modifier",
+  "description": "A simple example mod that modifies a text file",
+  "author": "infinite Team",
+  "version": "1.0.0",
+  "config": [
+    {
+      "type": "text",
+      "id": "customText",
+      "name": "Custom Text",
+      "description": "Custom text to add to the file",
+      "default": "Modified by infinite!"
+    }
+  ]
+}

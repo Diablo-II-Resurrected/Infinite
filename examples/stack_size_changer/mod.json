@@ -1,0 +1,25 @@
+{
+  "name": "Stack Size Changer",
+  "description": "Change the stack size for stackable items like gems, runes, and potions",
+  "author": "infinite Team",
+  "website": "https://github.com/olegbl/d2rmm",
+  "version": "1.0.0",
+  "config": [
+    {
+      "type": "checkbox",
+      "id": "enabled",
+      "name": "Enable Mod",
+      "description": "Enable or disable this mod",
+      "default": true
+    },
+    {
+      "type": "number",
+      "id": "stackSize",
+      "name": "Stack Size",
+      "description": "Maximum stack size for stackable items",
+      "default": 500,
+      "min": 1,
+      "max": 9999
+    }
+  ]
+}
