@@ -18,7 +18,8 @@ A high-performance command-line mod manager for Diablo II: Resurrected, written 
 - **🖥️ Native UI**: Fast and responsive native GUI built with egui
 - **🌏 Chinese Support**: Full Chinese language support with proper font rendering
 - **💾 Auto-Save**: Remembers your game path and mod list ✨ NEW
-- **🎮 Easy to Use**: Simple drag-free interface for managing mods
+- **� GitHub Integration**: Add mods directly from GitHub with branch/subdir selection ✨ NEW
+- **�🎮 Easy to Use**: Simple drag-free interface for managing mods
 - **🔄 Real-time**: Live status updates and progress feedback
 
 ## 🆕 What's New - CASC Integration

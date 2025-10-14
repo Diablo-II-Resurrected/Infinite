@@ -14,6 +14,20 @@ pub struct InfiniteApp {
     is_processing: Arc<Mutex<bool>>,
     // 进度信息
     progress: Arc<Mutex<Option<String>>>,
+    // GitHub对话框状态
+    github_dialog: Option<GitHubDialog>,
+}
+
+/// GitHub Mod添加对话框
+struct GitHubDialog {
+    repo_url: String,
+    branches: Arc<Mutex<Vec<String>>>,
+    selected_branch: Option<String>,
+    subdirs: Arc<Mutex<Vec<String>>>,
+    selected_subdir: Option<String>,
+    is_loading: Arc<Mutex<bool>>,
+    is_loading_dirs: Arc<Mutex<bool>>,
+    error_message: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -81,6 +95,7 @@ impl InfiniteApp {
             status_message: Arc::new(Mutex::new("准备就绪".to_string())),
             is_processing: Arc::new(Mutex::new(false)),
             progress: Arc::new(Mutex::new(None)),
+            github_dialog: None,
         }
     }
 
@@ -200,6 +215,216 @@ impl InfiniteApp {
             *self.status_message.lock().unwrap() = "已添加Mod".to_string();
             self.save_config();
         }
+    }
+
+    fn open_github_dialog(&mut self) {
+        self.github_dialog = Some(GitHubDialog {
+            repo_url: String::new(),
+            branches: Arc::new(Mutex::new(Vec::new())),
+            selected_branch: None,
+            subdirs: Arc::new(Mutex::new(Vec::new())),
+            selected_subdir: None,
+            is_loading: Arc::new(Mutex::new(false)),
+            is_loading_dirs: Arc::new(Mutex::new(false)),
+            error_message: Arc::new(Mutex::new(None)),
+        });
+    }
+
+    fn close_github_dialog(&mut self) {
+        self.github_dialog = None;
+    }
+
+    fn parse_github_url(url: &str) -> Option<String> {
+        // 支持的格式:
+        // https://github.com/user/repo
+        // github.com/user/repo
+        // user/repo
+        let url = url.trim();
+
+        if url.contains("github.com/") {
+            // 提取 user/repo 部分
+            if let Some(idx) = url.find("github.com/") {
+                let after = &url[idx + 11..];
+                let parts: Vec<&str> = after.split('/').collect();
+                if parts.len() >= 2 {
+                    return Some(format!("{}/{}", parts[0], parts[1]));
+                }
+            }
+        } else if url.contains('/') && !url.contains(':') {
+            // 直接是 user/repo 格式
+            let parts: Vec<&str> = url.split('/').collect();
+            if parts.len() >= 2 {
+                return Some(format!("{}/{}", parts[0], parts[1]));
+            }
+        }
+
+        None
+    }
+
+    fn fetch_github_info(&mut self, ctx: egui::Context) {
+        if let Some(dialog) = &mut self.github_dialog {
+            let repo = match Self::parse_github_url(&dialog.repo_url) {
+                Some(r) => r,
+                None => {
+                    *dialog.error_message.lock().unwrap() = Some("无效的 GitHub URL 格式".to_string());
+                    return;
+                }
+            };
+
+            *dialog.is_loading.lock().unwrap() = true;
+            *dialog.error_message.lock().unwrap() = None;
+
+            let repo_clone = repo.clone();
+            let branches_clone = dialog.branches.clone();
+            let error_clone = dialog.error_message.clone();
+            let is_loading_clone = dialog.is_loading.clone();
+
+            // 在新线程中获取分支信息
+            std::thread::spawn(move || {
+                // 使用 GitHub API 获取分支列表
+                let url = format!("https://api.github.com/repos/{}/branches", repo_clone);
+
+                match reqwest::blocking::Client::new()
+                    .get(&url)
+                    .header("User-Agent", "infinite-mod-manager")
+                    .send()
+                {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            if let Ok(branches_json) = response.json::<serde_json::Value>() {
+                                if let Some(branches_array) = branches_json.as_array() {
+                                    let branch_list: Vec<String> = branches_array
+                                        .iter()
+                                        .filter_map(|b| b.get("name")?.as_str())
+                                        .map(String::from)
+                                        .collect();
+
+                                    *branches_clone.lock().unwrap() = branch_list;
+                                    *is_loading_clone.lock().unwrap() = false;
+                                    ctx.request_repaint();
+                                    return;
+                                }
+                            }
+                        }
+
+                        *error_clone.lock().unwrap() = Some(format!("无法获取仓库信息: {}", status));
+                        *is_loading_clone.lock().unwrap() = false;
+                    }
+                    Err(e) => {
+                        *error_clone.lock().unwrap() = Some(format!("网络错误: {}", e));
+                        *is_loading_clone.lock().unwrap() = false;
+                    }
+                }
+                ctx.request_repaint();
+            });
+        }
+    }
+
+    fn fetch_github_directories(&mut self, ctx: egui::Context) {
+        if let Some(dialog) = &self.github_dialog {
+            let repo = match Self::parse_github_url(&dialog.repo_url) {
+                Some(r) => r,
+                None => return,
+            };
+
+            let branch = match &dialog.selected_branch {
+                Some(b) => b.clone(),
+                None => return,
+            };
+
+            *dialog.is_loading_dirs.lock().unwrap() = true;
+            *dialog.error_message.lock().unwrap() = None;
+
+            let subdirs_clone = dialog.subdirs.clone();
+            let error_clone = dialog.error_message.clone();
+            let is_loading_dirs_clone = dialog.is_loading_dirs.clone();
+
+            // 在新线程中获取目录树
+            std::thread::spawn(move || {
+                // 使用 GitHub API 获取目录树
+                let url = format!("https://api.github.com/repos/{}/git/trees/{}?recursive=1", repo, branch);
+
+                match reqwest::blocking::Client::new()
+                    .get(&url)
+                    .header("User-Agent", "infinite-mod-manager")
+                    .send()
+                {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            if let Ok(tree_json) = response.json::<serde_json::Value>() {
+                                if let Some(tree_array) = tree_json.get("tree").and_then(|t| t.as_array()) {
+                                    let mut dirs: Vec<String> = tree_array
+                                        .iter()
+                                        .filter_map(|item| {
+                                            // 只获取目录类型
+                                            if item.get("type")?.as_str()? == "tree" {
+                                                Some(item.get("path")?.as_str()?.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect();
+
+                                    // 排序并添加根目录选项
+                                    dirs.sort();
+                                    dirs.insert(0, "(根目录)".to_string());
+
+                                    *subdirs_clone.lock().unwrap() = dirs;
+                                    *is_loading_dirs_clone.lock().unwrap() = false;
+                                    ctx.request_repaint();
+                                    return;
+                                }
+                            }
+                        }
+
+                        *error_clone.lock().unwrap() = Some(format!("无法获取目录结构: {}", status));
+                        *is_loading_dirs_clone.lock().unwrap() = false;
+                    }
+                    Err(e) => {
+                        *error_clone.lock().unwrap() = Some(format!("网络错误: {}", e));
+                        *is_loading_dirs_clone.lock().unwrap() = false;
+                    }
+                }
+                ctx.request_repaint();
+            });
+        }
+    }
+
+    fn add_github_mod(&mut self) {
+        if let Some(dialog) = &self.github_dialog {
+            if let Some(repo) = Self::parse_github_url(&dialog.repo_url) {
+                let mut github_path = format!("github:{}", repo);
+
+                if let Some(subdir) = &dialog.selected_subdir {
+                    // 忽略 "(根目录)" 选项
+                    if !subdir.is_empty() && subdir != "(根目录)" {
+                        github_path = format!("{}:{}", github_path, subdir);
+                    }
+                }
+
+                if let Some(branch) = &dialog.selected_branch {
+                    if branch != "main" && branch != "master" {
+                        github_path = format!("{}@{}", github_path, branch);
+                    }
+                }
+
+                // 提取仓库名称作为 mod 名称
+                let name = repo.split('/').last().unwrap_or(&repo).to_string();
+
+                self.mods.push(ModEntry {
+                    path: github_path,
+                    enabled: true,
+                    name,
+                });
+
+                *self.status_message.lock().unwrap() = "已添加 GitHub Mod".to_string();
+                self.save_config();
+            }
+        }
+
+        self.close_github_dialog();
     }
 
     fn remove_mod(&mut self, index: usize) {
@@ -369,6 +594,10 @@ impl eframe::App for InfiniteApp {
                 if ui.button("➕ 添加Mod文件夹").clicked() && !is_processing {
                     self.add_mod_folder();
                 }
+
+                if ui.button("🌐 添加GitHub Mod").clicked() && !is_processing {
+                    self.open_github_dialog();
+                }
             });
 
             ui.add_space(10.0);
@@ -508,5 +737,192 @@ impl eframe::App for InfiniteApp {
                 );
             });
         });
+
+        // GitHub 对话框
+        let mut should_close = false;
+        let mut should_add = false;
+        let mut should_fetch = false;
+        let mut should_fetch_dirs = false;
+
+        if let Some(dialog) = &mut self.github_dialog {
+            egui::Window::new("🌐 添加 GitHub Mod")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        // 仓库 URL 输入
+                        ui.horizontal(|ui| {
+                            ui.label("仓库地址:");
+                            ui.add_space(5.0);
+                        });
+
+                        ui.add(
+                            egui::TextEdit::singleline(&mut dialog.repo_url)
+                                .hint_text("user/repo 或 https://github.com/user/repo")
+                                .desired_width(400.0)
+                        );
+
+                        ui.add_space(5.0);
+                        ui.label(
+                            egui::RichText::new("支持格式: user/repo 或 github.com/user/repo")
+                                .small()
+                                .color(egui::Color32::GRAY)
+                        );
+
+                        ui.add_space(10.0);
+
+                        // 获取分支按钮
+                        let is_loading = *dialog.is_loading.lock().unwrap();
+                        if ui.button("🔍 获取分支信息").clicked() && !is_loading {
+                            should_fetch = true;
+                        }
+
+                        ui.add_space(10.0);
+
+                        // 加载状态
+                        if is_loading {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("正在获取仓库信息...");
+                            });
+                        }
+
+                        // 错误消息
+                        if let Some(error) = dialog.error_message.lock().unwrap().clone() {
+                            ui.colored_label(egui::Color32::RED, error);
+                            ui.add_space(5.0);
+                        }
+
+                        // 分支选择
+                        let branches = dialog.branches.lock().unwrap().clone();
+                        if !branches.is_empty() {
+                            ui.separator();
+                            ui.add_space(5.0);
+
+                            // 记录上一次的分支选择
+                            let prev_branch = dialog.selected_branch.clone();
+
+                            ui.horizontal(|ui| {
+                                ui.label("分支:");
+                                egui::ComboBox::from_id_source("branch_combo")
+                                    .selected_text(
+                                        dialog.selected_branch
+                                            .as_ref()
+                                            .unwrap_or(&"选择分支".to_string())
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for branch in &branches {
+                                            ui.selectable_value(
+                                                &mut dialog.selected_branch,
+                                                Some(branch.clone()),
+                                                branch
+                                            );
+                                        }
+                                    });
+                            });
+
+                            // 检测分支是否改变
+                            if prev_branch != dialog.selected_branch && dialog.selected_branch.is_some() {
+                                // 分支改变，需要获取目录结构
+                                should_fetch_dirs = true;
+                            }
+
+                            ui.add_space(10.0);
+
+                            // 子目录选择
+                            let subdirs = dialog.subdirs.lock().unwrap().clone();
+                            let is_loading_dirs = *dialog.is_loading_dirs.lock().unwrap();
+
+                            if is_loading_dirs {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label("正在获取目录结构...");
+                                });
+                            } else if !subdirs.is_empty() {
+                                ui.horizontal(|ui| {
+                                    ui.label("子目录:");
+                                    egui::ComboBox::from_id_source("subdir_combo")
+                                        .selected_text(
+                                            dialog.selected_subdir
+                                                .as_ref()
+                                                .unwrap_or(&"(根目录)".to_string())
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            for subdir in &subdirs {
+                                                let display_text = subdir.clone();
+                                                ui.selectable_value(
+                                                    &mut dialog.selected_subdir,
+                                                    Some(subdir.clone()),
+                                                    display_text
+                                                );
+                                            }
+                                        });
+                                });
+                            } else if dialog.selected_branch.is_some() {
+                                // 有分支但还没加载目录，显示手动输入框
+                                ui.horizontal(|ui| {
+                                    ui.label("子目录:");
+                                    ui.add_space(5.0);
+                                });
+
+                                let mut subdir_text = dialog.selected_subdir.clone().unwrap_or_default();
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut subdir_text)
+                                        .hint_text("可选，例如: mods/my_mod")
+                                        .desired_width(400.0)
+                                );
+                                dialog.selected_subdir = if subdir_text.is_empty() {
+                                    None
+                                } else {
+                                    Some(subdir_text)
+                                };
+
+                                ui.add_space(5.0);
+                                ui.label(
+                                    egui::RichText::new("留空表示使用仓库根目录")
+                                        .small()
+                                        .color(egui::Color32::GRAY)
+                                );
+                            }
+                        }
+
+                        ui.add_space(15.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+
+                        // 按钮
+                        ui.horizontal(|ui| {
+                            let can_add = !dialog.repo_url.is_empty()
+                                && !branches.is_empty()
+                                && dialog.selected_branch.is_some()
+                                && !is_loading;
+
+                            ui.add_enabled_ui(can_add, |ui| {
+                                if ui.button("✅ 添加").clicked() {
+                                    should_add = true;
+                                }
+                            });
+
+                            if ui.button("❌ 取消").clicked() {
+                                should_close = true;
+                            }
+                        });
+                    });
+                });
+        }
+
+        // 处理对话框操作
+        if should_fetch {
+            self.fetch_github_info(ctx.clone());
+        }
+        if should_fetch_dirs {
+            self.fetch_github_directories(ctx.clone());
+        }
+        if should_add {
+            self.add_github_mod();
+        }
+        if should_close {
+            self.close_github_dialog();
+        }
     }
 }
