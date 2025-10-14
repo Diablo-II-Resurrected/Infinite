@@ -17,10 +17,10 @@ impl GitHubDownloader {
             .user_agent("infinite-d2rmm-cli")
             .build()
             .unwrap();
-        
+
         Self { client, cache_dir }
     }
-    
+
     /// Download a mod from GitHub
     /// Returns the local path where the mod was downloaded
     pub async fn download(
@@ -30,41 +30,41 @@ impl GitHubDownloader {
         branch: Option<&str>,
     ) -> Result<PathBuf> {
         let branch = branch.unwrap_or("main");
-        
+
         // Create cache directory structure: cache_dir/owner/repo/branch/subdir
         let parts: Vec<&str> = repo.split('/').collect();
         if parts.len() != 2 {
             anyhow::bail!("Invalid repo format: {}", repo);
         }
-        
+
         let owner = parts[0];
         let repo_name = parts[1];
-        
+
         let mut target_dir = self.cache_dir.join(owner).join(repo_name).join(branch);
         if let Some(subdir) = subdir {
             target_dir = target_dir.join(subdir);
         }
-        
+
         // Check if already downloaded
         if target_dir.exists() {
             tracing::info!("Using cached mod from: {}", target_dir.display());
             return Ok(target_dir);
         }
-        
+
         tracing::info!("Downloading from GitHub: {}/{} (branch: {})", owner, repo_name, branch);
         if let Some(subdir) = subdir {
             tracing::info!("  Subdirectory: {}", subdir);
         }
-        
+
         // Download using GitHub API
         let base_path = subdir.unwrap_or("");
         self.download_directory(owner, repo_name, branch, base_path, &target_dir)
             .await
             .context("Failed to download from GitHub")?;
-        
+
         Ok(target_dir)
     }
-    
+
     /// Download a directory from GitHub using the API
     fn download_directory<'a>(
         &'a self,
@@ -80,14 +80,14 @@ impl GitHubDownloader {
             "https://api.github.com/repos/{}/{}/contents/{}?ref={}",
             owner, repo, path, branch
         );
-        
+
         let response = self
             .client
             .get(&url)
             .send()
             .await
             .context("Failed to fetch from GitHub API")?;
-        
+
         if !response.status().is_success() {
             anyhow::bail!(
                 "GitHub API request failed with status {}: {}",
@@ -95,21 +95,21 @@ impl GitHubDownloader {
                 response.text().await.unwrap_or_default()
             );
         }
-        
+
         let items: Vec<GitHubContentItem> = response
             .json()
             .await
             .context("Failed to parse GitHub API response")?;
-        
+
         // Create target directory
         fs::create_dir_all(target_dir)
             .await
             .context("Failed to create target directory")?;
-        
+
         // Download each item
         for item in items {
             let item_path = target_dir.join(&item.name);
-            
+
             match item.item_type.as_str() {
                 "file" => {
                     // Download file content
@@ -124,7 +124,7 @@ impl GitHubDownloader {
                             .bytes()
                             .await
                             .context("Failed to read file content")?;
-                        
+
                         fs::write(&item_path, content)
                             .await
                             .context("Failed to write file")?;
@@ -141,11 +141,11 @@ impl GitHubDownloader {
                 }
             }
         }
-        
+
         Ok(())
         })
     }
-    
+
     /// Clear the download cache
     pub async fn clear_cache(&self) -> Result<()> {
         if self.cache_dir.exists() {

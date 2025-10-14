@@ -90,12 +90,12 @@ impl InfiniteApi {
 
                     // 第一行是标题
                     let headers = &rows[0];
-                    
+
                     // 转换为 Lua 字典数组
                     let table = lua.create_table()?;
                     for (i, row) in rows.iter().enumerate().skip(1) {
                         let row_table = lua.create_table()?;
-                        
+
                         // 使用列名作为键
                         for (j, cell) in row.iter().enumerate() {
                             if j < headers.len() {
@@ -105,16 +105,59 @@ impl InfiniteApi {
                             // 同时保留数字索引以兼容旧代码
                             row_table.set(j + 1, cell.as_str())?;
                         }
-                        
+
                         table.set(i, row_table)?;  // i 从 1 开始 (跳过标题行)
                     }
-                    
+
                     // 保存标题到特殊字段 __headers__ 以便写回时使用
                     let headers_table = lua.create_table()?;
                     for (i, header) in headers.iter().enumerate() {
                         headers_table.set(i + 1, header.as_str())?;
                     }
                     table.set("__headers__", headers_table)?;
+
+                    // 添加元表，支持 add() 方法
+                    let metatable = lua.create_table()?;
+
+                    // add() 方法：添加一个空行
+                    // 注意：使用 create_function 而不是 create_method，因为我们需要手动处理 self
+                    metatable.set(
+                        "add",
+                        lua.create_function(|lua, this: LuaTable| {
+                            // 查找下一个索引
+                            let mut next_idx = 1;
+                            for pair in this.clone().pairs::<mlua::Value, mlua::Value>() {
+                                let (k, _) = pair?;
+                                if let mlua::Value::Integer(i) = k {
+                                    if i > 0 {
+                                        next_idx = next_idx.max(i + 1);
+                                    }
+                                }
+                            }
+
+                            // 创建空行，列数基于表头
+                            let new_row = lua.create_table()?;
+                            if let Ok(headers_table) = this.get::<_, LuaTable>("__headers__") {
+                                // 只设置header键为空字符串，不设置数字索引
+                                // 这样当用户通过header名称设置值时，writeTsv会正确读取
+                                for pair in headers_table.pairs::<usize, String>() {
+                                    let (_, header) = pair?;
+                                    new_row.set(header.as_str(), "")?;
+                                }
+                            }
+
+                            // 添加到表中 - 直接添加，不要clone
+                            this.set(next_idx, new_row.clone())?;
+
+                            // 返回新行和索引
+                            Ok((new_row, next_idx))
+                        })?,
+                    )?;
+
+                    // 设置 __index 为元表自身，使方法可以通过 tsv:add() 调用
+                    metatable.set("__index", metatable.clone())?;
+
+                    table.set_metatable(Some(metatable));
 
                     Ok(table)
                 }
@@ -123,6 +166,7 @@ impl InfiniteApi {
 
         // writeTsv(path, data)
         // D2R TSV 文件需要标题行,从 __headers__ 字段读取
+        // 支持通过header名称或数字索引访问单元格
         let ctx = self.context.clone();
         infinite.set(
             "writeTsv",
@@ -130,21 +174,27 @@ impl InfiniteApi {
                 let ctx = ctx.clone();
                 async move {
                     let mut rows = Vec::new();
-                    
-                    // 提取标题
+
+                    // 提取标题并计算列数
                     let headers: Option<LuaTable> = data.get("__headers__").ok();
-                    if let Some(headers_table) = headers {
+                    let (header_row, num_columns) = if let Some(headers_table) = headers {
                         let mut header_row = Vec::new();
                         for pair in headers_table.pairs::<usize, String>() {
                             let (_, header) = pair?;
                             header_row.push(header);
                         }
-                        if !header_row.is_empty() {
-                            rows.push(header_row);
-                        }
+                        let col_count = header_row.len();
+                        (header_row, col_count)
+                    } else {
+                        (Vec::new(), 0)
+                    };
+
+                    // 写入标题行
+                    if !header_row.is_empty() {
+                        rows.push(header_row.clone());
                     }
-                    
-                    // 转换数据行 (跳过 __headers__)
+
+                    // 转换数据行 (跳过 __headers__ 和元表方法)
                     let mut data_indices: Vec<usize> = Vec::new();
                     for key in data.clone().pairs::<mlua::Value, mlua::Value>() {
                         let (k, _) = key?;
@@ -155,23 +205,45 @@ impl InfiniteApi {
                         }
                     }
                     data_indices.sort();
-                    
+
                     for idx in data_indices {
                         let row_table: LuaTable = data.get(idx)?;
                         let mut row = Vec::new();
-                        
-                        // 使用数字索引读取
-                        let mut col_idx = 1;
-                        loop {
-                            match row_table.get::<usize, String>(col_idx) {
-                                Ok(cell) => {
-                                    row.push(cell);
-                                    col_idx += 1;
+
+                        // 使用数字索引读取，基于表头的列数
+                        // 如果没有表头，则查找最大的列索引
+                        let max_col = if num_columns > 0 {
+                            num_columns
+                        } else {
+                            // 查找该行的最大列索引
+                            let mut max = 0;
+                            for pair in row_table.clone().pairs::<mlua::Value, mlua::Value>() {
+                                let (k, _) = pair?;
+                                if let mlua::Value::Integer(i) = k {
+                                    if i > 0 {
+                                        max = max.max(i as usize);
+                                    }
                                 }
-                                Err(_) => break,
                             }
+                            max
+                        };
+
+                        // 遍历所有列
+                        for col_idx in 1..=max_col {
+                            // 首先尝试通过数字索引读取
+                            let cell = if let Ok(value) = row_table.get::<usize, String>(col_idx) {
+                                value
+                            } else if col_idx <= header_row.len() {
+                                // 如果数字索引没有值，尝试通过header名称读取
+                                let header = &header_row[col_idx - 1];
+                                row_table.get::<_, String>(header.as_str())
+                                    .unwrap_or_else(|_| String::new())
+                            } else {
+                                String::new()
+                            };
+                            row.push(cell);
                         }
-                        
+
                         if !row.is_empty() {
                             rows.push(row);
                         }
@@ -230,7 +302,7 @@ impl InfiniteApi {
                 },
             )?,
         )?;
-        
+
         // extractFile(path) - Extract file from CASC if not already extracted
         let ctx = self.context.clone();
         infinite.set(
