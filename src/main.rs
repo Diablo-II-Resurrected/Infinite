@@ -4,8 +4,11 @@ use colored::Colorize;
 use infinite::cli::Cli;
 use infinite::casc::CascStorage;
 use infinite::file_system::FileManager;
+use infinite::github_downloader::GitHubDownloader;
 use infinite::mod_manager::ModLoader;
+use infinite::mod_sources::{ModList, ModSource};
 use infinite::runtime::{Context, ModExecutor};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -32,10 +35,12 @@ async fn main() -> Result<()> {
         infinite::cli::commands::Commands::Install {
             game_path,
             mods_path,
+            mod_list,
             output_path,
             dry_run,
+            clear_cache,
         } => {
-            install_mods(&game_path, &mods_path, &output_path, dry_run).await?;
+            install_mods(&game_path, mods_path.as_deref(), mod_list.as_deref(), &output_path, dry_run, clear_cache).await?;
         }
         infinite::cli::commands::Commands::List { mods_path } => {
             list_mods(&mods_path).await?;
@@ -50,14 +55,68 @@ async fn main() -> Result<()> {
 
 async fn install_mods(
     game_path: &str,
-    mods_path: &str,
+    mods_path: Option<&str>,
+    mod_list: Option<&str>,
     output_path: &str,
     dry_run: bool,
+    clear_cache: bool,
 ) -> Result<()> {
     println!("\n{}", "🎮 infinite CLI - Installing Mods".bright_cyan().bold());
     println!("{}", "═".repeat(50).bright_black());
     println!("  {}  {}", "Game:".bright_white(), game_path);
-    println!("  {}  {}", "Mods:".bright_white(), mods_path);
+
+    // Determine mod sources
+    let mod_dirs: Vec<PathBuf> = if let Some(list_path) = mod_list {
+        println!("  {}  {}", "Mod List:".bright_white(), list_path);
+
+        // Setup GitHub downloader
+        let cache_dir = PathBuf::from(".mod_cache");
+        let downloader = GitHubDownloader::new(cache_dir);
+
+        if clear_cache {
+            println!("  {} Clearing download cache...", "🗑️".bright_yellow());
+            downloader.clear_cache().await?;
+        }
+
+        // Load mod list
+        let mod_list = ModList::from_file(std::path::Path::new(list_path)).await?;
+        println!("  {} Loaded {} mod source(s)", "📝".bright_cyan(), mod_list.sources.len());
+
+        // Resolve all sources
+        let mut dirs = Vec::new();
+        for (idx, source) in mod_list.sources.iter().enumerate() {
+            println!("\n  {} [{}/{}] Processing source...", "⬇️".bright_blue(), idx + 1, mod_list.sources.len());
+            match source {
+                ModSource::Local { path } => {
+                    println!("    {} Local: {}", "📁".bright_green(), path.display());
+                    dirs.push(path.clone());
+                }
+                ModSource::GitHub { repo, subdir, branch } => {
+                    println!("    {} GitHub: {}", "🌐".bright_green(), repo);
+                    if let Some(subdir) = subdir {
+                        println!("      Subdirectory: {}", subdir);
+                    }
+                    if let Some(branch) = branch {
+                        println!("      Branch: {}", branch);
+                    }
+
+                    let local_path = downloader
+                        .download(repo, subdir.as_deref(), branch.as_deref())
+                        .await?;
+
+                    println!("    {} Downloaded to: {}", "✓".bright_green(), local_path.display());
+                    dirs.push(local_path);
+                }
+            }
+        }
+        dirs
+    } else if let Some(path) = mods_path {
+        println!("  {}  {}", "Mods:".bright_white(), path);
+        vec![PathBuf::from(path)]
+    } else {
+        anyhow::bail!("Either --mods-path or --mod-list must be specified");
+    };
+
     println!("  {} {}", "Output:".bright_white(), output_path);
     if dry_run {
         println!("  {}  {}", "Mode:".bright_white(), "DRY RUN".bright_yellow());
@@ -66,47 +125,64 @@ async fn install_mods(
 
     let start_time = Instant::now();
 
-    // Load all mods
-    let loader = ModLoader::new(mods_path);
-    let mods = loader.load_all()?;
+    // Load all mods from all directories
+    let mut all_mods = Vec::new();
+    for mod_dir in &mod_dirs {
+        // Check if this is a single mod or a mods directory
+        let config_path = mod_dir.join("mod.json");
+        if config_path.exists() {
+            // This is a single mod directory
+            let loader = ModLoader::new(mod_dir.parent().unwrap_or(&PathBuf::from(".")));
+            match loader.load_mod(mod_dir) {
+                Ok(mod_data) => all_mods.push(mod_data),
+                Err(e) => eprintln!("Warning: Failed to load mod at {:?}: {}", mod_dir, e),
+            }
+        } else {
+            // This is a directory containing multiple mods
+            let loader = ModLoader::new(mod_dir);
+            let mods = loader.load_all()?;
+            all_mods.extend(mods);
+        }
+    }
 
-    if mods.is_empty() {
+    if all_mods.is_empty() {
         println!("{}", "⚠️  No mods found!".bright_yellow());
         return Ok(());
     }
 
-    println!("📦 Found {} mod(s)\n", mods.len());
+    println!("📦 Found {} mod(s)\n", all_mods.len());
 
     // Create shared file manager
     let mut file_manager = FileManager::new();
-    
+    file_manager.set_output_path(output_path);
+    file_manager.set_game_path(game_path);
+
     // Try to open CASC storage
     match CascStorage::open(game_path) {
         Ok(casc) => {
             tracing::info!("CASC storage opened successfully");
             file_manager.set_casc_storage(Arc::new(casc));
-            file_manager.set_output_path(output_path);
         }
         Err(e) => {
             tracing::warn!("Failed to open CASC storage: {}. File extraction will be disabled.", e);
             tracing::warn!("Make sure the game path is correct and the game is installed.");
         }
     }
-    
+
     let file_manager = Arc::new(RwLock::new(file_manager));
 
     // Create mod executor
     let executor = ModExecutor::new()?;
 
     // Install each mod
-    for (idx, mod_data) in mods.iter().enumerate() {
+    for (idx, mod_data) in all_mods.iter().enumerate() {
         let mod_start = Instant::now();
 
         println!(
             "{} {}/{} - {} {}",
             "⚙️".bright_blue(),
             (idx + 1).to_string().bright_white(),
-            mods.len(),
+            all_mods.len(),
             mod_data.config.name.bright_green(),
             format!("v{}", mod_data.config.version).bright_black()
         );
@@ -144,6 +220,21 @@ async fn install_mods(
     }
 
     let total_elapsed = start_time.elapsed();
+
+    // Flush all cached file modifications to disk
+    println!("\n{}", "💾 Flushing cached modifications...".bright_cyan());
+    {
+        let mut fm = file_manager.write().await;
+        if let Err(e) = fm.flush_cache().await {
+            eprintln!(
+                "{} Failed to flush cache: {}",
+                "⚠️".bright_yellow(),
+                e.to_string().bright_red()
+            );
+        } else {
+            println!("{} All modifications written to disk", "✅".bright_green());
+        }
+    }
 
     // Print summary
     println!("{}", "═".repeat(50).bright_black());

@@ -44,6 +44,14 @@ impl Context {
     pub async fn read_json(&self, file_path: &str) -> Result<serde_json::Value> {
         let mut fm = self.file_manager.write().await;
 
+        // Try to read from cache first (for chained modifications)
+        if let Ok(content) = fm.read_file_with_cache(file_path, &self.mod_id).await {
+            // Parse from cached content
+            let value = JsonHandler::parse_from_bytes(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse cached JSON '{}': {}", file_path, e))?;
+            return Ok(value);
+        }
+
         // Extract file from CASC if needed
         let full_path = fm.ensure_extracted(file_path, &self.mod_id).await?;
 
@@ -65,15 +73,12 @@ impl Context {
             return Ok(());
         }
 
-        let full_path = self.output_path.join(file_path);
+        // Write to cache instead of directly to disk
+        let content = JsonHandler::to_bytes(&data)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize JSON '{}': {}", file_path, e))?;
 
-        JsonHandler::write(&full_path, &data)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to write JSON file '{}': {}", file_path, e))?;
-
-        // Record the write operation
         let mut fm = self.file_manager.write().await;
-        fm.record_write(file_path, &self.mod_id);
+        fm.write_file_to_cache(file_path, content, &self.mod_id);
 
         Ok(())
     }
@@ -81,6 +86,14 @@ impl Context {
     /// Read a TSV file
     pub async fn read_tsv(&self, file_path: &str) -> Result<Vec<Vec<String>>> {
         let mut fm = self.file_manager.write().await;
+
+        // Try to read from cache first (for chained modifications)
+        if let Ok(content) = fm.read_file_with_cache(file_path, &self.mod_id).await {
+            // Parse from cached content
+            let rows = TsvHandler::parse_from_bytes(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse cached TSV '{}': {}", file_path, e))?;
+            return Ok(rows);
+        }
 
         // Extract file from CASC if needed
         let full_path = fm.ensure_extracted(file_path, &self.mod_id).await?;
@@ -103,15 +116,12 @@ impl Context {
             return Ok(());
         }
 
-        let full_path = self.output_path.join(file_path);
+        // Write to cache instead of directly to disk
+        let content = TsvHandler::to_bytes(&data)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize TSV '{}': {}", file_path, e))?;
 
-        TsvHandler::write(&full_path, &data)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to write TSV file '{}': {}", file_path, e))?;
-
-        // Record the write operation
         let mut fm = self.file_manager.write().await;
-        fm.record_write(file_path, &self.mod_id);
+        fm.write_file_to_cache(file_path, content, &self.mod_id);
 
         Ok(())
     }
@@ -119,6 +129,14 @@ impl Context {
     /// Read a text file
     pub async fn read_txt(&self, file_path: &str) -> Result<String> {
         let mut fm = self.file_manager.write().await;
+
+        // Try to read from cache first (for chained modifications)
+        if let Ok(content) = fm.read_file_with_cache(file_path, &self.mod_id).await {
+            // Parse from cached content
+            let text = String::from_utf8(content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse cached text '{}' as UTF-8: {}", file_path, e))?;
+            return Ok(text);
+        }
 
         // Extract file from CASC if needed
         let full_path = fm.ensure_extracted(file_path, &self.mod_id).await?;
@@ -141,15 +159,11 @@ impl Context {
             return Ok(());
         }
 
-        let full_path = self.output_path.join(file_path);
+        // Write to cache instead of directly to disk
+        let bytes = content.as_bytes().to_vec();
 
-        TextHandler::write(&full_path, content)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to write text file '{}': {}", file_path, e))?;
-
-        // Record the write operation
         let mut fm = self.file_manager.write().await;
-        fm.record_write(file_path, &self.mod_id);
+        fm.write_file_to_cache(file_path, bytes, &self.mod_id);
 
         Ok(())
     }
@@ -186,7 +200,7 @@ impl Context {
 
         Ok(())
     }
-    
+
     /// Extract a file from CASC storage
     /// This ensures the file is available for reading
     pub async fn extract_file(&self, file_path: &str) -> Result<()> {
@@ -194,14 +208,14 @@ impl Context {
             tracing::info!("[DRY RUN] Would extract: {}", file_path);
             return Ok(());
         }
-        
+
         let mut fm = self.file_manager.write().await;
-        
+
         // Use the ensure_extracted method from FileManager
         let extracted_path = fm.ensure_extracted(file_path, &self.mod_id).await?;
-        
+
         tracing::info!("Extracted: {} -> {}", file_path, extracted_path.display());
-        
+
         Ok(())
     }
 }

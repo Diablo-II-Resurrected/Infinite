@@ -21,9 +21,13 @@ pub enum Commands {
         #[arg(short, long)]
         game_path: String,
 
-        /// Path to the mods directory
-        #[arg(short, long)]
-        mods_path: String,
+        /// Path to the mods directory (mutually exclusive with --mod-list)
+        #[arg(short, long, conflicts_with = "mod_list")]
+        mods_path: Option<String>,
+
+        /// Path to a mod list file (mutually exclusive with --mods-path)
+        #[arg(short = 'l', long, conflicts_with = "mods_path")]
+        mod_list: Option<String>,
 
         /// Path to the output directory
         #[arg(short, long)]
@@ -32,6 +36,10 @@ pub enum Commands {
         /// Dry run (don't write files)
         #[arg(long)]
         dry_run: bool,
+
+        /// Clear GitHub download cache before installing
+        #[arg(long)]
+        clear_cache: bool,
     },
 
     /// List available mods

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::collections::HashMap;
 
 /// Handler for TSV (Tab-Separated Values) files
 pub struct TsvHandler;
@@ -44,7 +43,7 @@ impl TsvHandler {
         // - 包含逗号的字段需要用双引号包围
         // - 这是 D2R 游戏引擎的要求
         let mut content = String::new();
-        
+
         for row in data {
             let formatted_row: Vec<String> = row
                 .iter()
@@ -57,7 +56,7 @@ impl TsvHandler {
                     }
                 })
                 .collect();
-            
+
             content.push_str(&formatted_row.join("\t"));
             content.push('\n');
         }
@@ -67,6 +66,54 @@ impl TsvHandler {
             .context("Failed to write TSV file")?;
 
         Ok(())
+    }
+
+    /// Parse TSV from bytes
+    pub fn parse_from_bytes(content: &[u8]) -> Result<Vec<Vec<String>>> {
+        let text = std::str::from_utf8(content)
+            .context("Failed to decode UTF-8")?;
+
+        let mut reader = csv::ReaderBuilder::new()
+            .delimiter(b'\t')
+            .has_headers(false)
+            .flexible(true)
+            .quoting(true)
+            .double_quote(true)
+            .from_reader(text.as_bytes());
+
+        let mut rows = Vec::new();
+
+        for result in reader.records() {
+            let record = result.context("Failed to parse TSV record")?;
+            let row: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+            rows.push(row);
+        }
+
+        Ok(rows)
+    }
+
+    /// Convert TSV data to bytes
+    pub fn to_bytes(data: &[Vec<String>]) -> Result<Vec<u8>> {
+        let mut content = String::new();
+
+        for row in data {
+            let formatted_row: Vec<String> = row
+                .iter()
+                .map(|field| {
+                    // 如果字段包含逗号,用双引号包围
+                    if field.contains(',') {
+                        format!("\"{}\"", field)
+                    } else {
+                        field.clone()
+                    }
+                })
+                .collect();
+
+            content.push_str(&formatted_row.join("\t"));
+            content.push('\n');
+        }
+
+        Ok(content.into_bytes())
     }
 }
 

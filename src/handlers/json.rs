@@ -42,6 +42,28 @@ impl JsonHandler {
 
         Ok(())
     }
+
+    /// Parse JSON from bytes
+    pub fn parse_from_bytes(content: &[u8]) -> Result<serde_json::Value> {
+        let text = std::str::from_utf8(content)
+            .context("Failed to decode UTF-8")?;
+
+        // Remove BOM if present
+        let text = text.trim_start_matches('\u{FEFF}');
+
+        let value: serde_json::Value = serde_json::from_str(text)
+            .context("Failed to parse JSON")?;
+
+        Ok(value)
+    }
+
+    /// Convert JSON data to bytes
+    pub fn to_bytes(data: &serde_json::Value) -> Result<Vec<u8>> {
+        let content = serde_json::to_string_pretty(data)
+            .context("Failed to serialize JSON")?;
+
+        Ok(content.into_bytes())
+    }
 }
 
 #[cfg(test)]

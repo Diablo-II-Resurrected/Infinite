@@ -38,19 +38,42 @@ The binary will be available at `target/release/infinite` (or `infinite.exe` on 
 
 ## 🎮 Usage
 
-### List Available Mods
-
-```bash
-infinite list --mods-path "./mods"
-```
-
-### Install Mods
+### Install Mods from Directory
 
 ```bash
 infinite install \
     --game-path "C:/Program Files (x86)/Diablo II Resurrected" \
     --mods-path "./mods" \
     --output-path "./output"
+```
+
+### Install Mods from List File ✨ NEW
+
+Create a mod list file (`mods.txt`):
+```txt
+# Local mods
+mods/loot_filter
+mods/increased_stash
+
+# GitHub mods  
+github:user/d2r-mod
+github:user/repo:mods/specific_mod@branch
+```
+
+Then install:
+```bash
+infinite install \
+    --game-path "C:/Program Files (x86)/Diablo II Resurrected" \
+    --mod-list "./mods.txt" \
+    --output-path "./output"
+```
+
+See [Mod List Guide](docs/MOD_LIST.md) for detailed documentation.
+
+### List Available Mods
+
+```bash
+infinite list --mods-path "./mods"
 ```
 
 ### Validate a Mod
@@ -67,6 +90,16 @@ infinite install \
     --mods-path "./mods" \
     --output-path "./output" \
     --dry-run
+```
+
+### Clear GitHub Cache
+
+```bash
+infinite install \
+    --game-path "C:/Program Files (x86)/Diablo II Resurrected" \
+    --mod-list "./mods.txt" \
+    --output-path "./output" \
+    --clear-cache
 ```
 
 ## 📝 Creating Mods

@@ -4,6 +4,15 @@ use std::sync::Arc;
 use crate::casc::CascStorage;
 use anyhow::Result;
 
+/// In-memory cache of file contents
+#[derive(Debug, Clone)]
+pub struct CachedFile {
+    /// File content as bytes
+    pub content: Vec<u8>,
+    /// Whether this is the latest version
+    pub dirty: bool,
+}
+
 /// Type of file operation
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOperationType {
@@ -46,6 +55,9 @@ pub struct FileManager {
     files: HashMap<String, FileStatus>,
     casc_storage: Option<Arc<CascStorage>>,
     output_path: Option<PathBuf>,
+    game_path: Option<PathBuf>,
+    /// In-memory cache of file contents for chaining modifications
+    file_cache: HashMap<String, CachedFile>,
 }
 
 impl FileManager {
@@ -55,12 +67,19 @@ impl FileManager {
             files: HashMap::new(),
             casc_storage: None,
             output_path: None,
+            game_path: None,
+            file_cache: HashMap::new(),
         }
     }
     
     /// Set the CASC storage for extracting game files
     pub fn set_casc_storage(&mut self, storage: Arc<CascStorage>) {
         self.casc_storage = Some(storage);
+    }
+    
+    /// Set the game path
+    pub fn set_game_path<P: Into<PathBuf>>(&mut self, path: P) {
+        self.game_path = Some(path.into());
     }
     
     /// Set the output path for extracted files
@@ -104,7 +123,32 @@ impl FileManager {
             }
         }
         
-        Err(anyhow::anyhow!("CASC storage not configured or file not found: {}", file_path))
+        // If CASC is not available, try to read from game_path directly
+        if let Some(game_path) = &self.game_path {
+            if let Some(output_path) = &self.output_path {
+                let source_path = game_path.join(&normalized);
+                
+                // Check if file exists in game directory
+                if source_path.exists() {
+                    let dest_path = output_path.join(&normalized);
+                    
+                    // Create parent directory
+                    if let Some(parent) = dest_path.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    
+                    // Copy file from game directory to output
+                    tokio::fs::copy(&source_path, &dest_path).await?;
+                    
+                    // Record extraction
+                    self.record_extract(&normalized, mod_id);
+                    
+                    return Ok(dest_path);
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("CASC storage not configured and file not found in game directory: {}", file_path))
     }
 
     /// Get or create file status for a given path
@@ -252,6 +296,76 @@ impl FileManager {
         println!("   Total files tracked: {}", total_files);
         println!("   Files extracted: {}", extracted_files);
         println!("   Files modified: {}", modified_files);
+    }
+    
+    /// Read file content, preferring cached version if available
+    /// This allows multiple mods to chain their modifications
+    pub async fn read_file_with_cache(&mut self, file_path: &str, mod_id: &str) -> Result<Vec<u8>> {
+        let normalized = Self::normalize_path(file_path);
+        
+        // Check if we have a cached (modified) version
+        if let Some(cached) = self.file_cache.get(&normalized).cloned() {
+            tracing::debug!("Reading cached version of: {} (for {})", file_path, mod_id);
+            self.record_read(&normalized, mod_id);
+            return Ok(cached.content);
+        }
+        
+        // Otherwise, read from disk
+        let output_path = self.output_path.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Output path not set"))?
+            .clone();
+        let full_path = output_path.join(&normalized);
+        
+        if !full_path.exists() {
+            anyhow::bail!("File not found: {}", full_path.display());
+        }
+        
+        let content = tokio::fs::read(&full_path).await?;
+        self.record_read(&normalized, mod_id);
+        
+        Ok(content)
+    }
+    
+    /// Write file content to cache (not to disk yet)
+    /// This allows multiple mods to modify the same file
+    pub fn write_file_to_cache(&mut self, file_path: &str, content: Vec<u8>, mod_id: &str) {
+        let normalized = Self::normalize_path(file_path);
+        
+        self.file_cache.insert(normalized.clone(), CachedFile {
+            content,
+            dirty: true,
+        });
+        
+        self.record_write(&normalized, mod_id);
+        tracing::debug!("Cached write: {} (by {})", file_path, mod_id);
+    }
+    
+    /// Flush all cached files to disk
+    pub async fn flush_cache(&mut self) -> Result<()> {
+        let output_path = self.output_path.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Output path not set"))?;
+        
+        for (file_path, cached) in self.file_cache.drain() {
+            if cached.dirty {
+                let full_path = output_path.join(&file_path);
+                
+                // Create parent directory
+                if let Some(parent) = full_path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                
+                tokio::fs::write(&full_path, &cached.content).await?;
+                tracing::info!("Flushed to disk: {}", file_path);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if a file is in cache
+    pub fn is_cached(&self, file_path: &str) -> bool {
+        let normalized = Self::normalize_path(file_path);
+        self.file_cache.contains_key(&normalized)
     }
 }
 
