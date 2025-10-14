@@ -1,0 +1,70 @@
+# D2R Community Mod List Example
+#
+# This is an example mod list showcasing various community mods
+# for Diablo II: Resurrected. Uncomment the mods you want to use.
+#
+# Format:
+#   - Local paths: path/to/mod
+#   - GitHub: github:owner/repo[:subdir][@branch]
+
+# ============================================================
+# LOOT & DROPS
+# ============================================================
+
+# Better drop rates and improved loot
+# github:community/loot-filter
+
+# Show item levels on drops
+# github:mods/item-level-display
+
+# ============================================================
+# QUALITY OF LIFE
+# ============================================================
+
+# Increased stash size
+# github:qol/bigger-stash
+
+# Show monster health bars
+# github:qol/health-bars
+
+# Faster run/walk speed
+# github:qol/movement-speed
+
+# ============================================================
+# BALANCE CHANGES
+# ============================================================
+
+# Rebalanced skills
+# github:balance/skill-overhaul@v2.0
+
+# Improved uniques and sets
+# github:balance/item-rework:sets@stable
+
+# ============================================================
+# VISUAL IMPROVEMENTS
+# ============================================================
+
+# HD textures
+# github:visuals/hd-pack
+
+# Better UI
+# github:visuals/ui-improvements
+
+# ============================================================
+# LOCAL MODS (Examples)
+# ============================================================
+
+# Your personal mods
+# mods/my_custom_loot
+# mods/my_balance_changes
+# C:\Users\YourName\Documents\D2Mods\special_mod
+
+# ============================================================
+# EXPERIMENTAL (Use with caution)
+# ============================================================
+
+# Bleeding edge features
+# github:experimental/new-features@dev
+
+# Test builds
+# github:experimental/beta-test:unstable@latest

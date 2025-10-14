@@ -11,6 +11,9 @@ repository = "https://github.com/Diablo-II-Resurrected/Infinite"
 # Lua runtime
 mlua = { version = "0.9", features = ["lua54", "async", "serialize", "vendored"] }
 
+# JavaScript runtime (optional, work in progress)
+rquickjs = { version = "0.9.0", features = ["array-buffer", "loader", "classes"], optional = true }
+
 # CLI framework
 clap = { version = "4.5", features = ["derive", "cargo"] }
 colored = "2.1"
@@ -45,8 +48,12 @@ thiserror = "1.0"
 # GUI framework
 eframe = "0.27"
 egui = "0.27"
-rfd = "0.14"  # 原生文件对话框
-dirs = "5.0"  # 系统目录路径
+rfd = "0.14"  # Native file dialogs
+dirs = "5.0"  # System directory paths
+
+[features]
+default = []
+js-runtime = ["rquickjs"]
 
 [dev-dependencies]
 tempfile = "3.10"

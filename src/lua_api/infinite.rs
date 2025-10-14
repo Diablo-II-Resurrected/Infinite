@@ -135,18 +135,18 @@ impl InfiniteApi {
                                 }
                             }
 
-                            // 创建空行，列数基于表头
+                            // Create empty row with column count based on headers
                             let new_row = lua.create_table()?;
                             if let Ok(headers_table) = this.get::<_, LuaTable>("__headers__") {
-                                // 只设置header键为空字符串，不设置数字索引
-                                // 这样当用户通过header名称设置值时，writeTsv会正确读取
+                                // Only set header keys to empty strings, not numeric indices
+                                // This way when user sets values by header name, writeTsv will read correctly
                                 for pair in headers_table.pairs::<usize, String>() {
                                     let (_, header) = pair?;
                                     new_row.set(header.as_str(), "")?;
                                 }
                             }
 
-                            // 添加到表中 - 直接添加，不要clone
+                            // Add to table - add directly without clone
                             this.set(next_idx, new_row.clone())?;
 
                             // 返回新行和索引
@@ -228,13 +228,13 @@ impl InfiniteApi {
                             max
                         };
 
-                        // 遍历所有列
+                        // Iterate over all columns
                         for col_idx in 1..=max_col {
-                            // 首先尝试通过数字索引读取
+                            // First try to read via numeric index
                             let cell = if let Ok(value) = row_table.get::<usize, String>(col_idx) {
                                 value
                             } else if col_idx <= header_row.len() {
-                                // 如果数字索引没有值，尝试通过header名称读取
+                                // If numeric index has no value, try reading via header name
                                 let header = &header_row[col_idx - 1];
                                 row_table.get::<_, String>(header.as_str())
                                     .unwrap_or_else(|_| String::new())
