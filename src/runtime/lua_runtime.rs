@@ -101,7 +101,7 @@ impl LuaScriptRuntime {
     }
 
     /// 将 TSV 数据转换为 Lua 表
-    fn tsv_to_lua(&self, tsv: &TsvData) -> Result<Table> {
+    fn tsv_to_lua<'lua>(&'lua self, tsv: &TsvData) -> Result<Table<'lua>> {
         let table = self.lua.create_table()?;
 
         // headers
@@ -153,12 +153,12 @@ impl LuaScriptRuntime {
 impl ScriptRuntime for LuaScriptRuntime {
     fn setup_api(&mut self) -> Result<()> {
         let globals = self.lua.globals();
-        
+
         // Create infinite table with basic API
         let infinite = self.lua.create_table()?;
         infinite.set("getVersion", 1.5)?;
         globals.set("infinite", infinite)?;
-        
+
         // Create console table
         let console = self.lua.create_table()?;
         let log_fn = self.lua.create_function(|_, msg: String| {
@@ -170,7 +170,7 @@ impl ScriptRuntime for LuaScriptRuntime {
         console.set("warn", log_fn.clone())?;
         console.set("error", log_fn)?;
         globals.set("console", console)?;
-        
+
         Ok(())
     }
 
@@ -178,12 +178,10 @@ impl ScriptRuntime for LuaScriptRuntime {
         let globals = self.lua.globals();
         let config_table = self.lua.create_table()?;
 
-        for (key, value) in &config.values {
-            match value {
-                ConfigValue::Bool(b) => config_table.set(key.as_str(), *b)?,
-                ConfigValue::Number(n) => config_table.set(key.as_str(), *n)?,
-                ConfigValue::String(s) => config_table.set(key.as_str(), s.as_str())?,
-            }
+        // Convert HashMap<String, serde_json::Value> to Lua table
+        for (key, value) in config {
+            let lua_value = json_to_lua_value(&self.lua, value)?;
+            config_table.set(key.as_str(), lua_value)?;
         }
 
         globals.set("config", config_table)?;
@@ -194,21 +192,50 @@ impl ScriptRuntime for LuaScriptRuntime {
         let script_path = self.mod_path.join("mod.lua");
         let script = std::fs::read_to_string(&script_path)?;
 
-        self.lua
-            .load(&script)
-            .set_name("mod.lua")
-            .exec()
-            .map_err(|e| anyhow::anyhow!("Lua execution error: {}", e))?;
-
+        self.lua.load(&script).set_name("mod.lua").exec()?;
         Ok(())
     }
 
     fn cleanup(&mut self) -> Result<()> {
-        // Lua will clean up automatically
+        // Lua handles cleanup automatically through RAII
         Ok(())
     }
 
     fn runtime_type(&self) -> ScriptType {
         ScriptType::Lua
     }
+}
+
+// Helper function to convert serde_json::Value to mlua::Value
+fn json_to_lua_value<'lua>(lua: &'lua Lua, json: &serde_json::Value) -> Result<LuaValue<'lua>> {
+    use serde_json::Value as JV;
+
+    Ok(match json {
+        JV::Null => LuaValue::Nil,
+        JV::Bool(b) => LuaValue::Boolean(*b),
+        JV::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                LuaValue::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                LuaValue::Number(f)
+            } else {
+                LuaValue::Nil
+            }
+        }
+        JV::String(s) => LuaValue::String(lua.create_string(s)?),
+        JV::Array(arr) => {
+            let table = lua.create_table()?;
+            for (i, item) in arr.iter().enumerate() {
+                table.set(i + 1, json_to_lua_value(lua, item)?)?;
+            }
+            LuaValue::Table(table)
+        }
+        JV::Object(obj) => {
+            let table = lua.create_table()?;
+            for (k, v) in obj {
+                table.set(k.as_str(), json_to_lua_value(lua, v)?)?;
+            }
+            LuaValue::Table(table)
+        }
+    })
 }

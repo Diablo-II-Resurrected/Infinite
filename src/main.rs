@@ -175,9 +175,6 @@ async fn install_mods(
 
     let file_manager = Arc::new(RwLock::new(file_manager));
 
-    // Create mod executor
-    let executor = ModExecutor::new()?;
-
     // Install each mod
     for (idx, mod_data) in all_mods.iter().enumerate() {
         let mod_start = Instant::now();
@@ -202,8 +199,8 @@ async fn install_mods(
             dry_run,
         });
 
-        // Execute mod
-        match executor.execute_mod(mod_data, context).await {
+        // Execute mod (static method now)
+        match ModExecutor::execute_mod(mod_data, context).await {
             Ok(_) => {
                 let elapsed = mod_start.elapsed();
                 println!(

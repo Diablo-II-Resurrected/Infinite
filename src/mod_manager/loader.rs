@@ -8,13 +8,13 @@ use walkdir::WalkDir;
 pub struct LoadedMod {
     /// Unique mod identifier (directory name)
     pub id: String,
-    
+
     /// Path to the mod directory
     pub path: PathBuf,
-    
+
     /// Parsed mod configuration
     pub config: ModConfig,
-    
+
     /// User's configuration values
     pub user_config: UserConfig,
 }
@@ -65,7 +65,7 @@ impl ModLoader {
     /// Load a single mod from a directory
     pub fn load_mod(&self, mod_path: &Path) -> Result<LoadedMod> {
         let config_path = mod_path.join("mod.json");
-        
+
         if !config_path.exists() {
             anyhow::bail!("mod.json not found in {:?}", mod_path);
         }
@@ -76,10 +76,12 @@ impl ModLoader {
         let config: ModConfig = serde_json::from_str(&config_str)
             .context("Failed to parse mod.json")?;
 
-        // Check if mod.lua exists
+        // Check if mod.lua or mod.js exists
         let lua_path = mod_path.join("mod.lua");
-        if !lua_path.exists() {
-            anyhow::bail!("mod.lua not found in {:?}", mod_path);
+        let js_path = mod_path.join("mod.js");
+
+        if !lua_path.exists() && !js_path.exists() {
+            anyhow::bail!("Neither mod.lua nor mod.js found in {:?}", mod_path);
         }
 
         let id = mod_path

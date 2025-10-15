@@ -9,5 +9,5 @@ pub mod js_runtime;
 
 pub use context::Context;
 pub use executor::ModExecutor;
-pub use script_runtime::{ScriptRuntime, ScriptType, ScriptServices, UserConfig, ConfigValue, TsvData, TsvRow};
+pub use script_runtime::{ScriptRuntime, ScriptType, ScriptServices, UserConfig, TsvData, TsvRow};
 pub use factory::RuntimeFactory;
