@@ -90,8 +90,29 @@ impl ModLoader {
             .context("Invalid mod directory name")?
             .to_string();
 
-        // Generate default user configuration
-        let user_config = config.generate_default_config();
+        // 尝试加载用户配置文件 config.json
+        let user_config_path = mod_path.join("config.json");
+        let user_config = if user_config_path.exists() {
+            // 从 config.json 加载用户配置
+            match std::fs::read_to_string(&user_config_path) {
+                Ok(config_str) => {
+                    match serde_json::from_str(&config_str) {
+                        Ok(cfg) => {
+                            println!("Loaded user config from {:?}", user_config_path);
+                            cfg
+                        },
+                        Err(e) => {
+                            eprintln!("Warning: Failed to parse config.json for {}: {}", id, e);
+                            config.generate_default_config()
+                        }
+                    }
+                },
+                Err(_) => config.generate_default_config(),
+            }
+        } else {
+            // 如果不存在 config.json，使用默认配置
+            config.generate_default_config()
+        };
 
         Ok(LoadedMod {
             id,

@@ -1,5 +1,7 @@
 use eframe::egui;
+use infinite::ModConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -9,6 +11,8 @@ pub struct InfiniteApp {
     game_path: String,
     // Mod列表
     mods: Vec<ModEntry>,
+    // 当前选中的mod索引（用于显示配置面板）
+    selected_mod_index: Option<usize>,
     // 状态
     status_message: Arc<Mutex<String>>,
     is_processing: Arc<Mutex<bool>>,
@@ -35,6 +39,55 @@ struct ModEntry {
     path: String,
     enabled: bool,
     name: String,
+    /// 用户配置值（配置项ID -> 值）
+    #[serde(default)]
+    user_config: HashMap<String, serde_json::Value>,
+}
+
+impl ModEntry {
+    /// 从路径加载ModConfig
+    fn load_config(&self) -> Option<ModConfig> {
+        let mod_json_path = PathBuf::from(&self.path).join("mod.json");
+        if let Ok(content) = std::fs::read_to_string(&mod_json_path) {
+            if let Ok(config) = serde_json::from_str(&content) {
+                return Some(config);
+            }
+        }
+        None
+    }
+
+    /// 初始化用户配置（使用默认值）
+    fn init_user_config(&mut self) {
+        if let Some(mod_config) = self.load_config() {
+            for option in &mod_config.config {
+                // 获取配置项的ID和默认值
+                let (id, default_value) = match option {
+                    infinite::mod_manager::config::ConfigOption::CheckBox {
+                        id, default, ..
+                    } => (id.clone(), serde_json::json!(default)),
+                    infinite::mod_manager::config::ConfigOption::Number { id, default, .. } => {
+                        (id.clone(), serde_json::json!(default))
+                    }
+                    infinite::mod_manager::config::ConfigOption::Text { id, default, .. } => {
+                        (id.clone(), serde_json::json!(default))
+                    }
+                    infinite::mod_manager::config::ConfigOption::Select { id, default, .. } => {
+                        (id.clone(), serde_json::json!(default))
+                    }
+                };
+
+                // 如果用户配置中没有这个选项，使用默认值
+                if !self.user_config.contains_key(&id) {
+                    self.user_config.insert(id, default_value);
+                }
+            }
+        }
+    }
+
+    /// 生成用户配置的JSON
+    fn generate_user_config_json(&self) -> serde_json::Value {
+        serde_json::to_value(&self.user_config).unwrap_or(serde_json::json!({}))
+    }
 }
 
 /// 持久化配置
@@ -92,6 +145,7 @@ impl InfiniteApp {
         Self {
             game_path: config.game_path,
             mods: config.mods,
+            selected_mod_index: None,
             status_message: Arc::new(Mutex::new("准备就绪".to_string())),
             is_processing: Arc::new(Mutex::new(false)),
             progress: Arc::new(Mutex::new(None)),
@@ -137,14 +191,18 @@ impl InfiniteApp {
                             // 尝试从路径提取mod名称
                             let name = self.get_mod_name(line);
 
-                            self.mods.push(ModEntry {
+                            let mut mod_entry = ModEntry {
                                 path: line.to_string(),
                                 enabled: true,
                                 name,
-                            });
+                                user_config: HashMap::new(),
+                            };
+                            mod_entry.init_user_config();
+                            self.mods.push(mod_entry);
                         }
                     }
-                    *self.status_message.lock().unwrap() = format!("已加载 {} 个mod", self.mods.len());
+                    *self.status_message.lock().unwrap() =
+                        format!("已加载 {} 个mod", self.mods.len());
                     self.save_config();
                 }
                 Err(e) => {
@@ -180,7 +238,8 @@ impl InfiniteApp {
             .set_file_name("mod_list.txt")
             .save_file()
         {
-            let content: String = self.mods
+            let content: String = self
+                .mods
                 .iter()
                 .filter(|m| m.enabled)
                 .map(|m| m.path.clone())
@@ -206,11 +265,14 @@ impl InfiniteApp {
             let path_str = path.to_string_lossy().to_string();
             let name = self.get_mod_name(&path_str);
 
-            self.mods.push(ModEntry {
+            let mut mod_entry = ModEntry {
                 path: path_str.clone(),
                 enabled: true,
                 name,
-            });
+                user_config: HashMap::new(),
+            };
+            mod_entry.init_user_config();
+            self.mods.push(mod_entry);
 
             *self.status_message.lock().unwrap() = "已添加Mod".to_string();
             self.save_config();
@@ -266,7 +328,8 @@ impl InfiniteApp {
             let repo = match Self::parse_github_url(&dialog.repo_url) {
                 Some(r) => r,
                 None => {
-                    *dialog.error_message.lock().unwrap() = Some("无效的 GitHub URL 格式".to_string());
+                    *dialog.error_message.lock().unwrap() =
+                        Some("无效的 GitHub URL 格式".to_string());
                     return;
                 }
             };
@@ -308,7 +371,8 @@ impl InfiniteApp {
                             }
                         }
 
-                        *error_clone.lock().unwrap() = Some(format!("无法获取仓库信息: {}", status));
+                        *error_clone.lock().unwrap() =
+                            Some(format!("无法获取仓库信息: {}", status));
                         *is_loading_clone.lock().unwrap() = false;
                     }
                     Err(e) => {
@@ -343,7 +407,10 @@ impl InfiniteApp {
             // 在新线程中获取目录树
             std::thread::spawn(move || {
                 // 使用 GitHub API 获取目录树
-                let url = format!("https://api.github.com/repos/{}/git/trees/{}?recursive=1", repo, branch);
+                let url = format!(
+                    "https://api.github.com/repos/{}/git/trees/{}?recursive=1",
+                    repo, branch
+                );
 
                 match reqwest::blocking::Client::new()
                     .get(&url)
@@ -354,7 +421,9 @@ impl InfiniteApp {
                         let status = response.status();
                         if status.is_success() {
                             if let Ok(tree_json) = response.json::<serde_json::Value>() {
-                                if let Some(tree_array) = tree_json.get("tree").and_then(|t| t.as_array()) {
+                                if let Some(tree_array) =
+                                    tree_json.get("tree").and_then(|t| t.as_array())
+                                {
                                     let mut dirs: Vec<String> = tree_array
                                         .iter()
                                         .filter_map(|item| {
@@ -379,7 +448,8 @@ impl InfiniteApp {
                             }
                         }
 
-                        *error_clone.lock().unwrap() = Some(format!("无法获取目录结构: {}", status));
+                        *error_clone.lock().unwrap() =
+                            Some(format!("无法获取目录结构: {}", status));
                         *is_loading_dirs_clone.lock().unwrap() = false;
                     }
                     Err(e) => {
@@ -413,11 +483,14 @@ impl InfiniteApp {
                 // 提取仓库名称作为 mod 名称
                 let name = repo.split('/').last().unwrap_or(&repo).to_string();
 
-                self.mods.push(ModEntry {
+                let mut mod_entry = ModEntry {
                     path: github_path,
                     enabled: true,
                     name,
-                });
+                    user_config: HashMap::new(),
+                };
+                mod_entry.init_user_config();
+                self.mods.push(mod_entry);
 
                 *self.status_message.lock().unwrap() = "已添加 GitHub Mod".to_string();
                 self.save_config();
@@ -449,6 +522,223 @@ impl InfiniteApp {
         }
     }
 
+    /// 渲染Mod配置面板
+    fn render_config_panel(&mut self, ui: &mut egui::Ui) {
+        if let Some(index) = self.selected_mod_index {
+            if index < self.mods.len() {
+                // 先加载配置,避免借用冲突
+                let mod_config_opt = self.mods[index].load_config();
+                let mod_name = self.mods[index].name.clone();
+
+                if let Some(mod_config) = mod_config_opt {
+                    let description = mod_config.description.clone();
+                    let config_options = mod_config.config.clone();
+
+                    ui.group(|ui| {
+                        ui.heading(format!("⚙ {} - 配置", mod_name));
+
+                        if let Some(desc) = description {
+                            ui.label(egui::RichText::new(desc).small().color(egui::Color32::GRAY));
+                            ui.add_space(5.0);
+                        }
+
+                        ui.separator();
+                        ui.add_space(10.0);
+
+                        let mut config_changed = false;
+
+                        egui::ScrollArea::vertical()
+                            .max_height(200.0)
+                            .show(ui, |ui| {
+                                let mod_entry = &mut self.mods[index];
+                                ui.set_width(ui.available_width());
+
+                                for option in &config_options {
+                                    match option {
+                                        infinite::mod_manager::config::ConfigOption::CheckBox {
+                                            id,
+                                            name,
+                                            description,
+                                            default,
+                                        } => {
+                                            let mut value = mod_entry
+                                                .user_config
+                                                .get(id)
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(*default);
+
+                                            if ui.checkbox(&mut value, name).changed() {
+                                                mod_entry
+                                                    .user_config
+                                                    .insert(id.clone(), serde_json::json!(value));
+                                                config_changed = true;
+                                            }
+
+                                            if let Some(desc) = description {
+                                                ui.label(
+                                                    egui::RichText::new(desc)
+                                                        .small()
+                                                        .color(egui::Color32::GRAY),
+                                                );
+                                            }
+                                            ui.add_space(8.0);
+                                        }
+
+                                        infinite::mod_manager::config::ConfigOption::Number {
+                                            id,
+                                            name,
+                                            description,
+                                            min,
+                                            max,
+                                            default,
+                                        } => {
+                                            let mut value = mod_entry
+                                                .user_config
+                                                .get(id)
+                                                .and_then(|v| v.as_f64())
+                                                .unwrap_or(*default);
+
+                                            let changed = ui
+                                                .horizontal(|ui| {
+                                                    ui.label(name);
+
+                                                    if min.is_none() && max.is_none() {
+                                                        // 如果没有范围,使用 DragValue
+                                                        ui.add(egui::DragValue::new(&mut value))
+                                                            .changed()
+                                                    } else {
+                                                        // 使用 Slider
+                                                        ui.add(egui::Slider::new(
+                                                            &mut value,
+                                                            min.unwrap_or(0.0)
+                                                                ..=max.unwrap_or(100.0),
+                                                        ))
+                                                        .changed()
+                                                    }
+                                                })
+                                                .inner;
+
+                                            // 如果值改变了，更新配置
+                                            if changed {
+                                                mod_entry
+                                                    .user_config
+                                                    .insert(id.clone(), serde_json::json!(value));
+                                                config_changed = true;
+                                            }
+
+                                            if let Some(desc) = description {
+                                                ui.label(
+                                                    egui::RichText::new(desc)
+                                                        .small()
+                                                        .color(egui::Color32::GRAY),
+                                                );
+                                            }
+                                            ui.add_space(8.0);
+                                        }
+
+                                        infinite::mod_manager::config::ConfigOption::Text {
+                                            id,
+                                            name,
+                                            description,
+                                            default,
+                                        } => {
+                                            let mut value = mod_entry
+                                                .user_config
+                                                .get(id)
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or(default)
+                                                .to_string();
+
+                                            ui.horizontal(|ui| {
+                                                ui.label(name);
+                                                if ui.text_edit_singleline(&mut value).changed() {
+                                                    mod_entry.user_config.insert(
+                                                        id.clone(),
+                                                        serde_json::json!(value),
+                                                    );
+                                                    config_changed = true;
+                                                }
+                                            });
+
+                                            if let Some(desc) = description {
+                                                ui.label(
+                                                    egui::RichText::new(desc)
+                                                        .small()
+                                                        .color(egui::Color32::GRAY),
+                                                );
+                                            }
+                                            ui.add_space(8.0);
+                                        }
+
+                                        infinite::mod_manager::config::ConfigOption::Select {
+                                            id,
+                                            name,
+                                            description,
+                                            default,
+                                            options,
+                                        } => {
+                                            let mut value = mod_entry
+                                                .user_config
+                                                .get(id)
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or(default)
+                                                .to_string();
+
+                                            ui.horizontal(|ui| {
+                                                ui.label(name);
+                                                egui::ComboBox::from_id_source(id)
+                                                    .selected_text(&value)
+                                                    .show_ui(ui, |ui| {
+                                                        for opt in options {
+                                                            if ui
+                                                                .selectable_value(
+                                                                    &mut value,
+                                                                    opt.value.clone(),
+                                                                    &opt.label,
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                mod_entry.user_config.insert(
+                                                                    id.clone(),
+                                                                    serde_json::json!(value),
+                                                                );
+                                                                config_changed = true;
+                                                            }
+                                                        }
+                                                    });
+                                            });
+
+                                            if let Some(desc) = description {
+                                                ui.label(
+                                                    egui::RichText::new(desc)
+                                                        .small()
+                                                        .color(egui::Color32::GRAY),
+                                                );
+                                            }
+                                            ui.add_space(8.0);
+                                        }
+                                    }
+                                }
+                            });
+
+                        // 如果配置改变了,保存
+                        if config_changed {
+                            self.save_config();
+                        }
+                    });
+                } else {
+                    ui.group(|ui| {
+                        ui.label(
+                            egui::RichText::new("该Mod没有配置选项")
+                                .italics()
+                                .color(egui::Color32::GRAY),
+                        );
+                    });
+                }
+            }
+        }
+    }
+
     fn generate_mods(&mut self, ctx: egui::Context) {
         if self.game_path.is_empty() {
             *self.status_message.lock().unwrap() = "请先选择游戏路径".to_string();
@@ -460,10 +750,12 @@ impl InfiniteApp {
             return;
         }
 
-        let enabled_mods: Vec<String> = self.mods
+        // 收集启用的mods及其配置
+        let enabled_mods: Vec<(String, HashMap<String, serde_json::Value>)> = self
+            .mods
             .iter()
             .filter(|m| m.enabled)
-            .map(|m| m.path.clone())
+            .map(|m| (m.path.clone(), m.user_config.clone()))
             .collect();
 
         if enabled_mods.is_empty() {
@@ -480,7 +772,6 @@ impl InfiniteApp {
 
         // 克隆必要的数据
         let game_path = self.game_path.clone();
-        let mods = enabled_mods.clone();
         let status_msg = self.status_message.clone();
         let is_proc = self.is_processing.clone();
         let progress = self.progress.clone();
@@ -489,12 +780,27 @@ impl InfiniteApp {
         std::thread::spawn(move || {
             // 创建临时mod列表文件
             let temp_list = std::env::temp_dir().join("infinite_gui_mods.txt");
-            if let Err(e) = std::fs::write(&temp_list, mods.join("\n")) {
+            let mod_paths: Vec<String> =
+                enabled_mods.iter().map(|(path, _)| path.clone()).collect();
+            if let Err(e) = std::fs::write(&temp_list, mod_paths.join("\n")) {
                 *status_msg.lock().unwrap() = format!("❌ 无法创建临时文件: {}", e);
                 *is_proc.lock().unwrap() = false;
                 *progress.lock().unwrap() = None;
                 ctx.request_repaint();
                 return;
+            }
+
+            // 保存每个mod的用户配置到mod目录
+            for (mod_path, user_config) in &enabled_mods {
+                if !user_config.is_empty() {
+                    // 直接保存到mod目录的config.json
+                    let config_file = PathBuf::from(mod_path).join("config.json");
+                    if let Ok(config_json) = serde_json::to_string_pretty(user_config) {
+                        if let Err(e) = std::fs::write(&config_file, config_json) {
+                            eprintln!("Warning: Failed to write config for {}: {}", mod_path, e);
+                        }
+                    }
+                }
             }
 
             *progress.lock().unwrap() = Some("正在处理mods...".to_string());
@@ -523,6 +829,7 @@ impl InfiniteApp {
                     &game_path,
                     "--mod-list",
                     temp_list.to_str().unwrap(),
+                    "--clear-cache"
                 ])
                 .output();
 
@@ -610,7 +917,7 @@ impl eframe::App for InfiniteApp {
                         ui.label(
                             egui::RichText::new("没有mod，请添加或打开mod列表")
                                 .italics()
-                                .color(egui::Color32::GRAY)
+                                .color(egui::Color32::GRAY),
                         );
                     } else {
                         let mut to_remove = None;
@@ -619,38 +926,66 @@ impl eframe::App for InfiniteApp {
                         let mut config_changed = false;
 
                         for (index, mod_entry) in self.mods.iter_mut().enumerate() {
+                            let is_selected = self.selected_mod_index == Some(index);
+
+                            // 检查是否有配置选项
+                            let has_config = mod_entry
+                                .load_config()
+                                .map(|cfg| !cfg.config.is_empty())
+                                .unwrap_or(false);
+
                             ui.horizontal(|ui| {
                                 // 启用/禁用复选框
                                 if ui.checkbox(&mut mod_entry.enabled, "").changed() {
                                     config_changed = true;
                                 }
 
-                                // Mod名称
-                                ui.label(&mod_entry.name);
-
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    // 删除按钮
-                                    if ui.button("🗑").clicked() && !is_processing {
-                                        to_remove = Some(index);
+                                // Mod名称 - 如果有配置,点击可选中/取消选中
+                                if has_config {
+                                    let name_response =
+                                        ui.selectable_label(is_selected, &mod_entry.name);
+                                    if name_response.clicked() {
+                                        self.selected_mod_index =
+                                            if is_selected { None } else { Some(index) };
                                     }
+                                } else {
+                                    ui.label(&mod_entry.name);
+                                }
 
-                                    // 下移按钮
-                                    if ui.button("⬇").clicked() && !is_processing {
-                                        to_move_down = Some(index);
-                                    }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        // 删除按钮
+                                        if ui.button("🗑").clicked() && !is_processing {
+                                            to_remove = Some(index);
+                                        }
 
-                                    // 上移按钮
-                                    if ui.button("⬆").clicked() && !is_processing {
-                                        to_move_up = Some(index);
-                                    }
+                                        // 下移按钮
+                                        if ui.button("⬇").clicked() && !is_processing {
+                                            to_move_down = Some(index);
+                                        }
 
-                                    // 路径显示
-                                    ui.label(
-                                        egui::RichText::new(&mod_entry.path)
-                                            .small()
-                                            .color(egui::Color32::GRAY)
-                                    );
-                                });
+                                        // 上移按钮
+                                        if ui.button("⬆").clicked() && !is_processing {
+                                            to_move_up = Some(index);
+                                        }
+
+                                        // 配置按钮 - 只在有配置选项时显示
+                                        if has_config {
+                                            if ui.button("⚙").clicked() {
+                                                self.selected_mod_index =
+                                                    if is_selected { None } else { Some(index) };
+                                            }
+                                        }
+
+                                        // 路径显示
+                                        ui.label(
+                                            egui::RichText::new(&mod_entry.path)
+                                                .small()
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    },
+                                );
                             });
                             ui.add_space(5.0);
                         }
@@ -677,6 +1012,14 @@ impl eframe::App for InfiniteApp {
             ui.separator();
             ui.add_space(10.0);
 
+            // Mod配置面板
+            if self.selected_mod_index.is_some() {
+                self.render_config_panel(ui);
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+            }
+
             // 进度显示
             if let Some(prog) = progress {
                 ui.horizontal(|ui| {
@@ -694,10 +1037,7 @@ impl eframe::App for InfiniteApp {
                     && self.mods.iter().any(|m| m.enabled);
 
                 ui.add_enabled_ui(enabled, |ui| {
-                    let button = egui::Button::new(
-                        egui::RichText::new("🚀 生成Mods")
-                            .size(20.0)
-                    );
+                    let button = egui::Button::new(egui::RichText::new("🚀 生成Mods").size(20.0));
 
                     if ui.add_sized([150.0, 40.0], button).clicked() {
                         self.generate_mods(ctx.clone());
@@ -712,7 +1052,7 @@ impl eframe::App for InfiniteApp {
                     ui.label(
                         egui::RichText::new(format!("输出路径: {}", output_path))
                             .small()
-                            .color(egui::Color32::LIGHT_GRAY)
+                            .color(egui::Color32::LIGHT_GRAY),
                     );
                 }
             });
@@ -724,16 +1064,15 @@ impl eframe::App for InfiniteApp {
             ui.horizontal(|ui| {
                 ui.label("状态:");
                 ui.label(
-                    egui::RichText::new(&status_message)
-                        .color(if is_processing {
-                            egui::Color32::YELLOW
-                        } else if status_message.starts_with("✅") {
-                            egui::Color32::GREEN
-                        } else if status_message.starts_with("❌") {
-                            egui::Color32::RED
-                        } else {
-                            egui::Color32::LIGHT_BLUE
-                        })
+                    egui::RichText::new(&status_message).color(if is_processing {
+                        egui::Color32::YELLOW
+                    } else if status_message.starts_with("✅") {
+                        egui::Color32::GREEN
+                    } else if status_message.starts_with("❌") {
+                        egui::Color32::RED
+                    } else {
+                        egui::Color32::LIGHT_BLUE
+                    }),
                 );
             });
         });
@@ -759,14 +1098,14 @@ impl eframe::App for InfiniteApp {
                         ui.add(
                             egui::TextEdit::singleline(&mut dialog.repo_url)
                                 .hint_text("user/repo 或 https://github.com/user/repo")
-                                .desired_width(400.0)
+                                .desired_width(400.0),
                         );
 
                         ui.add_space(5.0);
                         ui.label(
                             egui::RichText::new("支持格式: user/repo 或 github.com/user/repo")
                                 .small()
-                                .color(egui::Color32::GRAY)
+                                .color(egui::Color32::GRAY),
                         );
 
                         ui.add_space(10.0);
@@ -806,23 +1145,26 @@ impl eframe::App for InfiniteApp {
                                 ui.label("分支:");
                                 egui::ComboBox::from_id_source("branch_combo")
                                     .selected_text(
-                                        dialog.selected_branch
+                                        dialog
+                                            .selected_branch
                                             .as_ref()
-                                            .unwrap_or(&"选择分支".to_string())
+                                            .unwrap_or(&"选择分支".to_string()),
                                     )
                                     .show_ui(ui, |ui| {
                                         for branch in &branches {
                                             ui.selectable_value(
                                                 &mut dialog.selected_branch,
                                                 Some(branch.clone()),
-                                                branch
+                                                branch,
                                             );
                                         }
                                     });
                             });
 
                             // 检测分支是否改变
-                            if prev_branch != dialog.selected_branch && dialog.selected_branch.is_some() {
+                            if prev_branch != dialog.selected_branch
+                                && dialog.selected_branch.is_some()
+                            {
                                 // 分支改变，需要获取目录结构
                                 should_fetch_dirs = true;
                             }
@@ -843,9 +1185,10 @@ impl eframe::App for InfiniteApp {
                                     ui.label("子目录:");
                                     egui::ComboBox::from_id_source("subdir_combo")
                                         .selected_text(
-                                            dialog.selected_subdir
+                                            dialog
+                                                .selected_subdir
                                                 .as_ref()
-                                                .unwrap_or(&"(根目录)".to_string())
+                                                .unwrap_or(&"(根目录)".to_string()),
                                         )
                                         .show_ui(ui, |ui| {
                                             for subdir in &subdirs {
@@ -853,7 +1196,7 @@ impl eframe::App for InfiniteApp {
                                                 ui.selectable_value(
                                                     &mut dialog.selected_subdir,
                                                     Some(subdir.clone()),
-                                                    display_text
+                                                    display_text,
                                                 );
                                             }
                                         });
@@ -865,11 +1208,12 @@ impl eframe::App for InfiniteApp {
                                     ui.add_space(5.0);
                                 });
 
-                                let mut subdir_text = dialog.selected_subdir.clone().unwrap_or_default();
+                                let mut subdir_text =
+                                    dialog.selected_subdir.clone().unwrap_or_default();
                                 ui.add(
                                     egui::TextEdit::singleline(&mut subdir_text)
                                         .hint_text("可选，例如: mods/my_mod")
-                                        .desired_width(400.0)
+                                        .desired_width(400.0),
                                 );
                                 dialog.selected_subdir = if subdir_text.is_empty() {
                                     None
@@ -881,7 +1225,7 @@ impl eframe::App for InfiniteApp {
                                 ui.label(
                                     egui::RichText::new("留空表示使用仓库根目录")
                                         .small()
-                                        .color(egui::Color32::GRAY)
+                                        .color(egui::Color32::GRAY),
                                 );
                             }
                         }

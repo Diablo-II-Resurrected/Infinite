@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, Context as AnyhowContext};
 use clap::Parser;
 use colored::Colorize;
 use infinite::cli::Cli;
@@ -155,6 +155,15 @@ async fn install_mods(
     }
 
     println!("📦 Found {} mod(s)\n", all_mods.len());
+
+    // Clear output directory if it exists
+    let output_path_buf = PathBuf::from(output_path);
+    if output_path_buf.exists() {
+        println!("  {} Clearing output directory...", "🗑️".bright_yellow());
+        std::fs::remove_dir_all(&output_path_buf)
+            .with_context(|| format!("Failed to clear output directory: {}", output_path))?;
+        println!("  {} Output directory cleared", "✅".bright_green());
+    }
 
     // Create shared file manager
     let mut file_manager = FileManager::new();

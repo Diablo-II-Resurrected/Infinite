@@ -10,7 +10,7 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([900.0, 600.0])
+            .with_inner_size([900.0, 660.0])
             .with_min_inner_size([800.0, 500.0])
             .with_icon(
                 // 可以添加图标
