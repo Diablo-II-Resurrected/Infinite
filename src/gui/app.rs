@@ -34,6 +34,16 @@ struct GitHubDialog {
     error_message: Arc<Mutex<Option<String>>>,
 }
 
+/// 配置加载状态
+#[derive(Clone, Default)]
+enum ConfigLoadState {
+    #[default]
+    NotLoaded,
+    Loading,
+    Loaded(ModConfig),
+    Failed(String),
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct ModEntry {
     path: String,
@@ -42,24 +52,148 @@ struct ModEntry {
     /// 用户配置值（配置项ID -> 值）
     #[serde(default)]
     user_config: HashMap<String, serde_json::Value>,
+    /// 缓存的配置加载状态 (不持久化)
+    #[serde(skip)]
+    config_state: Arc<Mutex<ConfigLoadState>>,
 }
 
 impl ModEntry {
     /// 从路径加载ModConfig
-    fn load_config(&self) -> Option<ModConfig> {
-        let mod_json_path = if self.path.starts_with("github:") {
-            // 解析 GitHub 路径: github:owner/repo:subdir@branch
-            self.resolve_github_path()?.join("mod.json")
-        } else {
-            PathBuf::from(&self.path).join("mod.json")
-        };
-
-        if let Ok(content) = std::fs::read_to_string(&mod_json_path) {
-            if let Ok(config) = serde_json::from_str(&content) {
-                return Some(config);
+    fn load_config(&self, ctx: Option<egui::Context>) -> Option<ModConfig> {
+        // 检查缓存状态
+        let state = self.config_state.lock().unwrap().clone();
+        match state {
+            ConfigLoadState::Loaded(config) => return Some(config),
+            ConfigLoadState::Failed(_) => return None, // 已经失败过,不再重试
+            ConfigLoadState::Loading => return None, // 正在加载中
+            ConfigLoadState::NotLoaded => {
+                // 需要加载
             }
         }
-        None
+
+        // 标记为正在加载
+        *self.config_state.lock().unwrap() = ConfigLoadState::Loading;
+
+        let result = if self.path.starts_with("github:") {
+            // 尝试从缓存加载
+            if let Some(cache_path) = self.resolve_github_path() {
+                let mod_json = cache_path.join("mod.json");
+                if mod_json.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&mod_json) {
+                        if let Ok(config) = serde_json::from_str::<ModConfig>(&content) {
+                            *self.config_state.lock().unwrap() = ConfigLoadState::Loaded(config.clone());
+                            return Some(config);
+                        }
+                    }
+                }
+            }
+
+            // 缓存不存在,启动异步任务从 GitHub API 获取
+            self.load_config_from_github_async(ctx);
+            None
+        } else {
+            let mod_json_path = PathBuf::from(&self.path).join("mod.json");
+            if let Ok(content) = std::fs::read_to_string(&mod_json_path) {
+                let config: Option<ModConfig> = serde_json::from_str(&content).ok();
+                if let Some(ref cfg) = config {
+                    *self.config_state.lock().unwrap() = ConfigLoadState::Loaded(cfg.clone());
+                } else {
+                    *self.config_state.lock().unwrap() = ConfigLoadState::Failed("Failed to parse config".to_string());
+                }
+                config
+            } else {
+                *self.config_state.lock().unwrap() = ConfigLoadState::Failed("Config file not found".to_string());
+                None
+            }
+        };
+
+        result
+    }
+
+    /// 异步从 GitHub API 加载配置
+    fn load_config_from_github_async(&self, ctx: Option<egui::Context>) {
+        if !self.path.starts_with("github:") {
+            return;
+        }
+
+        println!("🌐 Fetching mod.json from GitHub for: {}", self.path);
+
+        // 克隆必要的数据
+        let path = self.path.clone();
+        let config_state = self.config_state.clone();
+
+        // 在后台线程中执行
+        std::thread::spawn(move || {
+            // 解析 GitHub 路径
+            let path_str = &path[7..];
+            let (path_without_branch, branch) = if let Some(at_pos) = path_str.rfind('@') {
+                (&path_str[..at_pos], &path_str[at_pos + 1..])
+            } else {
+                (path_str, "main")
+            };
+
+            let (repo, subdir) = if let Some(colon_pos) = path_without_branch.find(':') {
+                (&path_without_branch[..colon_pos], Some(&path_without_branch[colon_pos + 1..]))
+            } else {
+                (path_without_branch, None)
+            };
+
+            // 构建 GitHub API URL
+            let file_path = if let Some(subdir) = subdir {
+                format!("{}/mod.json", subdir)
+            } else {
+                "mod.json".to_string()
+            };
+
+            let url = format!(
+                "https://api.github.com/repos/{}/contents/{}?ref={}",
+                repo, file_path, branch
+            );
+
+            // 尝试从 GitHub API 获取
+            match reqwest::blocking::Client::new()
+                .get(&url)
+                .header("User-Agent", "infinite-mod-manager")
+                .send()
+            {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        if let Ok(content_json) = response.json::<serde_json::Value>() {
+                            // GitHub API 返回 base64 编码的内容
+                            if let Some(content_b64) = content_json.get("content").and_then(|c| c.as_str()) {
+                                // 移除换行符
+                                let content_b64 = content_b64.replace("\n", "");
+                                use base64::Engine;
+                                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&content_b64) {
+                                    if let Ok(content_str) = String::from_utf8(decoded) {
+                                        if let Ok(config) = serde_json::from_str(&content_str) {
+                                            println!("✅ Successfully loaded mod.json from GitHub");
+                                            *config_state.lock().unwrap() = ConfigLoadState::Loaded(config);
+                                            // 请求重绘
+                                            if let Some(ctx) = ctx {
+                                                ctx.request_repaint();
+                                            }
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        eprintln!("⚠️ GitHub API error: {}", response.status());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to fetch mod.json from GitHub: {}", e);
+                }
+            }
+
+            // 失败情况
+            *config_state.lock().unwrap() = ConfigLoadState::Failed("Failed to load config from GitHub".to_string());
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+        });
     }
 
     /// 解析 GitHub 路径到实际的缓存路径
@@ -109,7 +243,7 @@ impl ModEntry {
 
     /// 初始化用户配置（使用默认值）
     fn init_user_config(&mut self) {
-        if let Some(mod_config) = self.load_config() {
+        if let Some(mod_config) = self.load_config(None) {
             for option in &mod_config.config {
                 // 获取配置项的ID和默认值
                 let (id, default_value) = match option {
@@ -260,6 +394,7 @@ impl InfiniteApp {
                                 enabled: true,
                                 name,
                                 user_config: HashMap::new(),
+                                config_state: Arc::new(Mutex::new(ConfigLoadState::NotLoaded)),
                             };
                             mod_entry.init_user_config();
                             self.mods.push(mod_entry);
@@ -334,6 +469,7 @@ impl InfiniteApp {
                 enabled: true,
                 name,
                 user_config: HashMap::new(),
+                config_state: Arc::new(Mutex::new(ConfigLoadState::NotLoaded)),
             };
             mod_entry.init_user_config();
             self.mods.push(mod_entry);
@@ -597,6 +733,7 @@ impl InfiniteApp {
                     enabled: true,
                     name,
                     user_config: HashMap::new(),
+                    config_state: Arc::new(Mutex::new(ConfigLoadState::NotLoaded)),
                 };
                 mod_entry.init_user_config();
                 self.mods.push(mod_entry);
@@ -632,11 +769,11 @@ impl InfiniteApp {
     }
 
     /// 渲染Mod配置面板
-    fn render_config_panel(&mut self, ui: &mut egui::Ui) {
+    fn render_config_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if let Some(index) = self.selected_mod_index {
             if index < self.mods.len() {
                 // 先加载配置,避免借用冲突
-                let mod_config_opt = self.mods[index].load_config();
+                let mod_config_opt = self.mods[index].load_config(Some(ctx.clone()));
                 let mod_name = self.mods[index].name.clone();
 
                 if let Some(mod_config) = mod_config_opt {
@@ -1100,7 +1237,7 @@ impl eframe::App for InfiniteApp {
 
                             // 检查是否有配置选项
                             let has_config = mod_entry
-                                .load_config()
+                                .load_config(Some(ctx.clone()))
                                 .map(|cfg| !cfg.config.is_empty())
                                 .unwrap_or(false);
 
@@ -1184,7 +1321,7 @@ impl eframe::App for InfiniteApp {
 
             // Mod配置面板
             if self.selected_mod_index.is_some() {
-                self.render_config_panel(ui);
+                self.render_config_panel(ui, ctx);
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(10.0);
