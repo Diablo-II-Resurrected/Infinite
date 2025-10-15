@@ -77,6 +77,30 @@ async fn install_mods(
     println!("{}", "═".repeat(50).bright_black());
     println!("  {}  {}", "Game:".bright_white(), game_path);
 
+    // 尝试读取 GUI 传递的配置映射
+    let temp_config_path = std::env::temp_dir().join("infinite_gui_config.json");
+    let gui_config_map: std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>> =
+        if temp_config_path.exists() {
+            match std::fs::read_to_string(&temp_config_path) {
+                Ok(content) => {
+                    match serde_json::from_str(&content) {
+                        Ok(map) => {
+                            tracing::info!("Loaded GUI config mapping with {} mod(s)",
+                                std::collections::HashMap::<String, std::collections::HashMap<String, serde_json::Value>>::len(&map));
+                            map
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse GUI config: {}", e);
+                            std::collections::HashMap::new()
+                        }
+                    }
+                }
+                Err(_) => std::collections::HashMap::new()
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
     // Determine mod sources
     let mod_dirs: Vec<PathBuf> = if let Some(list_path) = mod_list {
         println!("  {}  {}", "Mod List:".bright_white(), list_path);
@@ -117,6 +141,42 @@ async fn install_mods(
                         .await?;
 
                     println!("    {} Downloaded to: {}", "✓".bright_green(), local_path.display());
+
+                    // 检查是否有 GUI 传递的配置需要应用
+                    // 构建 github: 格式的路径来匹配 GUI 配置
+                    let mut github_path = format!("github:{}", repo);
+                    if let Some(subdir) = subdir {
+                        github_path = format!("{}:{}", github_path, subdir);
+                    }
+                    if let Some(branch) = branch {
+                        if branch != "main" && branch != "master" {
+                            github_path = format!("{}@{}", github_path, branch);
+                        }
+                    }
+
+                    // 如果有配置,立即写入到下载的 mod 目录
+                    if let Some(user_config) = gui_config_map.get(&github_path) {
+                        if !user_config.is_empty() {
+                            let config_file = local_path.join("config.json");
+                            match serde_json::to_string_pretty(user_config) {
+                                Ok(config_json) => {
+                                    match std::fs::write(&config_file, config_json) {
+                                        Ok(_) => {
+                                            tracing::info!("Applied GUI config to: {}", config_file.display());
+                                            println!("    {} Applied user configuration", "⚙️".bright_cyan());
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to write config for {}: {}", github_path, e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to serialize config for {}: {}", github_path, e);
+                                }
+                            }
+                        }
+                    }
+
                     dirs.push(local_path);
                 }
             }

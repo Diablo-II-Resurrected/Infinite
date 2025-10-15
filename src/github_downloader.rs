@@ -8,17 +8,32 @@ use tokio::fs;
 pub struct GitHubDownloader {
     client: reqwest::Client,
     cache_dir: PathBuf,
+    github_token: Option<String>,
 }
 
 impl GitHubDownloader {
     /// Create a new GitHub downloader
     pub fn new(cache_dir: PathBuf) -> Self {
+        // Try to read GitHub token from environment variable
+        let github_token = std::env::var("GITHUB_TOKEN").ok();
+
+        if github_token.is_some() {
+            tracing::info!("Using GitHub token for authentication");
+        } else {
+            tracing::warn!("No GitHub token found. API requests will be rate-limited (60/hour)");
+            tracing::warn!("Set GITHUB_TOKEN environment variable to increase limit to 5000/hour");
+        }
+
         let client = reqwest::Client::builder()
             .user_agent("infinite-d2rmm-cli")
             .build()
             .unwrap();
 
-        Self { client, cache_dir }
+        Self {
+            client,
+            cache_dir,
+            github_token,
+        }
     }
 
     /// Download a mod from GitHub
@@ -81,9 +96,14 @@ impl GitHubDownloader {
             owner, repo, path, branch
         );
 
-        let response = self
-            .client
-            .get(&url)
+        let mut request = self.client.get(&url);
+
+        // Add authentication if token is available
+        if let Some(token) = &self.github_token {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+
+        let response = request
             .send()
             .await
             .context("Failed to fetch from GitHub API")?;

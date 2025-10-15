@@ -20,6 +20,20 @@ pub struct InfiniteApp {
     progress: Arc<Mutex<Option<String>>>,
     // GitHub对话框状态
     github_dialog: Option<GitHubDialog>,
+    // GitHub Token (可选)
+    github_token: Option<String>,
+    // GitHub API 速率限制信息
+    github_rate_limit: Arc<Mutex<Option<GitHubRateLimit>>>,
+    // 是否显示设置对话框
+    show_settings: bool,
+}
+
+/// GitHub API 速率限制信息
+#[derive(Clone)]
+struct GitHubRateLimit {
+    remaining: u32,
+    limit: u32,
+    reset_time: std::time::SystemTime,
 }
 
 /// GitHub Mod添加对话框
@@ -59,7 +73,7 @@ struct ModEntry {
 
 impl ModEntry {
     /// 从路径加载ModConfig
-    fn load_config(&self, ctx: Option<egui::Context>) -> Option<ModConfig> {
+    fn load_config(&self, ctx: Option<egui::Context>, github_token: Option<String>) -> Option<ModConfig> {
         // 检查缓存状态
         let state = self.config_state.lock().unwrap().clone();
         match state {
@@ -89,7 +103,7 @@ impl ModEntry {
             }
 
             // 缓存不存在,启动异步任务从 GitHub API 获取
-            self.load_config_from_github_async(ctx);
+            self.load_config_from_github_async(ctx, github_token);
             None
         } else {
             let mod_json_path = PathBuf::from(&self.path).join("mod.json");
@@ -111,7 +125,7 @@ impl ModEntry {
     }
 
     /// 异步从 GitHub API 加载配置
-    fn load_config_from_github_async(&self, ctx: Option<egui::Context>) {
+    fn load_config_from_github_async(&self, ctx: Option<egui::Context>, github_token: Option<String>) {
         if !self.path.starts_with("github:") {
             return;
         }
@@ -150,13 +164,30 @@ impl ModEntry {
                 repo, file_path, branch
             );
 
-            // 尝试从 GitHub API 获取
-            match reqwest::blocking::Client::new()
+            // 构建请求
+            let mut request = reqwest::blocking::Client::new()
                 .get(&url)
-                .header("User-Agent", "infinite-mod-manager")
-                .send()
-            {
+                .header("User-Agent", "infinite-mod-manager");
+
+            // 如果有 token,添加认证
+            if let Some(token) = github_token {
+                request = request.header("Authorization", format!("Bearer {}", token));
+            }
+
+            // 尝试从 GitHub API 获取
+            match request.send() {
                 Ok(response) => {
+                    // 检查速率限制
+                    if let Some(remaining) = response.headers().get("x-ratelimit-remaining") {
+                        if let Ok(remaining_str) = remaining.to_str() {
+                            if let Ok(remaining_num) = remaining_str.parse::<u32>() {
+                                if remaining_num < 10 {
+                                    eprintln!("⚠️ GitHub API rate limit warning: {} requests remaining", remaining_num);
+                                }
+                            }
+                        }
+                    }
+
                     if response.status().is_success() {
                         if let Ok(content_json) = response.json::<serde_json::Value>() {
                             // GitHub API 返回 base64 编码的内容
@@ -179,6 +210,8 @@ impl ModEntry {
                                 }
                             }
                         }
+                    } else if response.status().as_u16() == 403 {
+                        eprintln!("⚠️ GitHub API rate limit exceeded. Consider adding a GitHub token in settings.");
                     } else {
                         eprintln!("⚠️ GitHub API error: {}", response.status());
                     }
@@ -243,7 +276,7 @@ impl ModEntry {
 
     /// 初始化用户配置（使用默认值）
     fn init_user_config(&mut self) {
-        if let Some(mod_config) = self.load_config(None) {
+        if let Some(mod_config) = self.load_config(None, None) {
             for option in &mod_config.config {
                 // 获取配置项的ID和默认值
                 let (id, default_value) = match option {
@@ -280,6 +313,8 @@ impl ModEntry {
 struct AppConfig {
     game_path: String,
     mods: Vec<ModEntry>,
+    #[serde(default)]
+    github_token: Option<String>,
 }
 
 impl AppConfig {
@@ -341,13 +376,16 @@ impl InfiniteApp {
         let config = AppConfig::load();
 
         Self {
-            game_path: config.game_path,
+            game_path: config.game_path.clone(),
             mods: config.mods,
             selected_mod_index: None,
             status_message: Arc::new(Mutex::new("准备就绪".to_string())),
             is_processing: Arc::new(Mutex::new(false)),
             progress: Arc::new(Mutex::new(None)),
             github_dialog: None,
+            github_token: config.github_token,
+            github_rate_limit: Arc::new(Mutex::new(None)),
+            show_settings: false,
         }
     }
 
@@ -356,6 +394,7 @@ impl InfiniteApp {
         let config = AppConfig {
             game_path: self.game_path.clone(),
             mods: self.mods.clone(),
+            github_token: self.github_token.clone(),
         };
 
         if let Err(e) = config.save() {
@@ -586,18 +625,50 @@ impl InfiniteApp {
             let branches_clone = dialog.branches.clone();
             let error_clone = dialog.error_message.clone();
             let is_loading_clone = dialog.is_loading.clone();
+            let github_token = self.github_token.clone();
+            let rate_limit_clone = self.github_rate_limit.clone();
 
             // 在新线程中获取分支信息
             std::thread::spawn(move || {
                 // 使用 GitHub API 获取分支列表
                 let url = format!("https://api.github.com/repos/{}/branches", repo_clone);
 
-                match reqwest::blocking::Client::new()
+                let mut request = reqwest::blocking::Client::new()
                     .get(&url)
-                    .header("User-Agent", "infinite-mod-manager")
-                    .send()
-                {
+                    .header("User-Agent", "infinite-mod-manager");
+
+                // 添加 token (如果有)
+                if let Some(token) = github_token {
+                    request = request.header("Authorization", format!("Bearer {}", token));
+                }
+
+                match request.send() {
                     Ok(response) => {
+                        // 更新速率限制信息
+                        if let (Some(remaining), Some(limit), Some(reset)) = (
+                            response.headers().get("x-ratelimit-remaining"),
+                            response.headers().get("x-ratelimit-limit"),
+                            response.headers().get("x-ratelimit-reset"),
+                        ) {
+                            if let (Ok(rem_str), Ok(lim_str), Ok(reset_str)) = (
+                                remaining.to_str(),
+                                limit.to_str(),
+                                reset.to_str(),
+                            ) {
+                                if let (Ok(rem), Ok(lim), Ok(reset_ts)) = (
+                                    rem_str.parse::<u32>(),
+                                    lim_str.parse::<u32>(),
+                                    reset_str.parse::<u64>(),
+                                ) {
+                                    *rate_limit_clone.lock().unwrap() = Some(GitHubRateLimit {
+                                        remaining: rem,
+                                        limit: lim,
+                                        reset_time: std::time::UNIX_EPOCH + std::time::Duration::from_secs(reset_ts),
+                                    });
+                                }
+                            }
+                        }
+
                         let status = response.status();
                         if status.is_success() {
                             if let Ok(branches_json) = response.json::<serde_json::Value>() {
@@ -648,6 +719,7 @@ impl InfiniteApp {
             let subdirs_clone = dialog.subdirs.clone();
             let error_clone = dialog.error_message.clone();
             let is_loading_dirs_clone = dialog.is_loading_dirs.clone();
+            let github_token = self.github_token.clone();
 
             // 在新线程中获取目录树
             std::thread::spawn(move || {
@@ -657,11 +729,16 @@ impl InfiniteApp {
                     repo, branch
                 );
 
-                match reqwest::blocking::Client::new()
+                let mut request = reqwest::blocking::Client::new()
                     .get(&url)
-                    .header("User-Agent", "infinite-mod-manager")
-                    .send()
-                {
+                    .header("User-Agent", "infinite-mod-manager");
+
+                // 添加 token (如果有)
+                if let Some(token) = github_token {
+                    request = request.header("Authorization", format!("Bearer {}", token));
+                }
+
+                match request.send() {
                     Ok(response) => {
                         let status = response.status();
                         if status.is_success() {
@@ -773,7 +850,7 @@ impl InfiniteApp {
         if let Some(index) = self.selected_mod_index {
             if index < self.mods.len() {
                 // 先加载配置,避免借用冲突
-                let mod_config_opt = self.mods[index].load_config(Some(ctx.clone()));
+                let mod_config_opt = self.mods[index].load_config(Some(ctx.clone()), self.github_token.clone());
                 let mod_name = self.mods[index].name.clone();
 
                 if let Some(mod_config) = mod_config_opt {
@@ -1021,6 +1098,7 @@ impl InfiniteApp {
         let status_msg = self.status_message.clone();
         let is_proc = self.is_processing.clone();
         let progress = self.progress.clone();
+        let github_token = self.github_token.clone();
 
         // 在新线程中运行
         std::thread::spawn(move || {
@@ -1105,15 +1183,21 @@ impl InfiniteApp {
             };
 
             // 调用infinite CLI（不指定output-path，使用默认路径）
-            let result = std::process::Command::new(&cli_exe)
-                .args(&[
-                    "install",
-                    "--game-path",
-                    &game_path,
-                    "--mod-list",
-                    temp_list.to_str().unwrap()
-                ])
-                .output();
+            let mut command = std::process::Command::new(&cli_exe);
+            command.args(&[
+                "install",
+                "--game-path",
+                &game_path,
+                "--mod-list",
+                temp_list.to_str().unwrap()
+            ]);
+
+            // 如果有 GitHub token,通过环境变量传递给 CLI
+            if let Some(token) = github_token {
+                command.env("GITHUB_TOKEN", token);
+            }
+
+            let result = command.output();
 
             // 清理临时文件
             let _ = std::fs::remove_file(&temp_list);
@@ -1171,7 +1255,31 @@ impl eframe::App for InfiniteApp {
         let progress = self.progress.lock().unwrap().clone();
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Infinite - Diablo II: Resurrected Mod Manager");
+            ui.horizontal(|ui| {
+                ui.heading("Infinite - Diablo II: Resurrected Mod Manager");
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // GitHub API 速率限制显示
+                    if let Some(rate_limit) = self.github_rate_limit.lock().unwrap().as_ref() {
+                        let color = if rate_limit.remaining < 10 {
+                            egui::Color32::RED
+                        } else if rate_limit.remaining < 50 {
+                            egui::Color32::YELLOW
+                        } else {
+                            egui::Color32::GREEN
+                        };
+                        ui.colored_label(
+                            color,
+                            format!("🔄 API: {}/{}", rate_limit.remaining, rate_limit.limit),
+                        );
+                    }
+
+                    // 设置按钮
+                    if ui.button("⚙ 设置").clicked() {
+                        self.show_settings = true;
+                    }
+                });
+            });
             ui.add_space(10.0);
 
             // 游戏路径选择
@@ -1237,7 +1345,7 @@ impl eframe::App for InfiniteApp {
 
                             // 检查是否有配置选项
                             let has_config = mod_entry
-                                .load_config(Some(ctx.clone()))
+                                .load_config(Some(ctx.clone()), self.github_token.clone())
                                 .map(|cfg| !cfg.config.is_empty())
                                 .unwrap_or(false);
 
@@ -1574,6 +1682,85 @@ impl eframe::App for InfiniteApp {
         }
         if should_close {
             self.close_github_dialog();
+        }
+
+        // 设置对话框
+        if self.show_settings {
+            let mut should_close_settings = false;
+
+            egui::Window::new("⚙ 设置")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.heading("GitHub Token");
+                        ui.add_space(5.0);
+
+                        ui.label(
+                            egui::RichText::new(
+                                "配置 GitHub Personal Access Token 可以提高 API 限额:\n\
+                                 • 未认证: 60 请求/小时\n\
+                                 • 认证后: 5000 请求/小时\n\n\
+                                 创建 Token: https://github.com/settings/tokens\n\
+                                 权限: 只需要 public_repo (读取公开仓库)"
+                            )
+                            .small()
+                            .color(egui::Color32::GRAY),
+                        );
+
+                        ui.add_space(10.0);
+
+                        let mut token_text = self.github_token.clone().unwrap_or_default();
+                        ui.horizontal(|ui| {
+                            ui.label("Token:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut token_text)
+                                    .password(true)
+                                    .hint_text("ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+                                    .desired_width(300.0),
+                            );
+                        });
+
+                        self.github_token = if token_text.is_empty() {
+                            None
+                        } else {
+                            Some(token_text)
+                        };
+
+                        ui.add_space(10.0);
+
+                        // 显示当前 API 状态
+                        if let Some(rate_limit) = self.github_rate_limit.lock().unwrap().as_ref() {
+                            ui.separator();
+                            ui.label(format!("当前 API 限额: {}/{}", rate_limit.remaining, rate_limit.limit));
+
+                            if let Ok(elapsed) = rate_limit.reset_time.elapsed() {
+                                ui.label(format!("已过去: {} 秒", elapsed.as_secs()));
+                            } else if let Ok(duration) = rate_limit.reset_time.duration_since(std::time::SystemTime::now()) {
+                                ui.label(format!("重置时间: {} 秒后", duration.as_secs()));
+                            }
+                        }
+
+                        ui.add_space(15.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+
+                        ui.horizontal(|ui| {
+                            if ui.button("✅ 保存").clicked() {
+                                self.save_config();
+                                should_close_settings = true;
+                            }
+
+                            if ui.button("❌ 取消").clicked() {
+                                should_close_settings = true;
+                            }
+                        });
+                    });
+                });
+
+            if should_close_settings {
+                self.show_settings = false;
+            }
         }
     }
 }
