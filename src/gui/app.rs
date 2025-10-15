@@ -402,6 +402,11 @@ impl InfiniteApp {
         }
     }
 
+    /// 统一路径格式显示 - 将反斜杠转换为正斜杠
+    fn normalize_path_display(path: &str) -> String {
+        path.replace('\\', "/")
+    }
+
     fn select_game_path(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .set_title("选择暗黑破坏神2重制版游戏目录")
@@ -501,6 +506,13 @@ impl InfiniteApp {
             .pick_folder()
         {
             let path_str = path.to_string_lossy().to_string();
+
+            // 检查路径是否已存在
+            if self.mods.iter().any(|m| m.path == path_str) {
+                *self.status_message.lock().unwrap() = "⚠️ 该Mod已存在于列表中".to_string();
+                return;
+            }
+
             let name = self.get_mod_name(&path_str);
 
             let mut mod_entry = ModEntry {
@@ -802,6 +814,13 @@ impl InfiniteApp {
                     }
                 }
 
+                // 检查路径是否已存在
+                if self.mods.iter().any(|m| m.path == github_path) {
+                    *self.status_message.lock().unwrap() = "⚠️ 该GitHub Mod已存在于列表中".to_string();
+                    self.close_github_dialog();
+                    return;
+                }
+
                 // 提取仓库名称作为 mod 名称
                 let name = repo.split('/').last().unwrap_or(&repo).to_string();
 
@@ -870,13 +889,11 @@ impl InfiniteApp {
 
                         let mut config_changed = false;
 
-                        egui::ScrollArea::vertical()
-                            .max_height(200.0)
-                            .show(ui, |ui| {
-                                let mod_entry = &mut self.mods[index];
-                                ui.set_width(ui.available_width());
+                        // 配置选项区域 - 不需要内部滚动,外层已经有了
+                        let mod_entry = &mut self.mods[index];
+                        ui.set_width(ui.available_width());
 
-                                for option in &config_options {
+                        for option in &config_options {
                                     match option {
                                         infinite::mod_manager::config::ConfigOption::CheckBox {
                                             id,
@@ -1042,7 +1059,6 @@ impl InfiniteApp {
                                         }
                                     }
                                 }
-                            });
 
                         // 如果配置改变了,保存
                         if config_changed {
@@ -1290,7 +1306,7 @@ impl eframe::App for InfiniteApp {
                 }
                 ui.add_space(10.0);
                 if !self.game_path.is_empty() {
-                    ui.label(&self.game_path);
+                    ui.label(Self::normalize_path_display(&self.game_path));
                 } else {
                     ui.label("未选择");
                 }
@@ -1324,9 +1340,14 @@ impl eframe::App for InfiniteApp {
 
             ui.add_space(10.0);
 
-            // Mod列表显示
+            // Mod列表显示 - 固定高度避免向下顶出窗口
+            ui.label(egui::RichText::new(format!("共 {} 个Mod", self.mods.len())).weak());
+            ui.add_space(5.0);
+
             egui::ScrollArea::vertical()
-                .max_height(300.0)
+                .id_source("mod_list_scroll")
+                .max_height(200.0)
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if self.mods.is_empty() {
                         ui.label(
@@ -1395,7 +1416,7 @@ impl eframe::App for InfiniteApp {
 
                                         // 路径显示
                                         ui.label(
-                                            egui::RichText::new(&mod_entry.path)
+                                            egui::RichText::new(Self::normalize_path_display(&mod_entry.path))
                                                 .small()
                                                 .color(egui::Color32::GRAY),
                                         );
@@ -1427,9 +1448,19 @@ impl eframe::App for InfiniteApp {
             ui.separator();
             ui.add_space(10.0);
 
-            // Mod配置面板
+            // Mod配置面板 - 限制高度避免超出窗口
             if self.selected_mod_index.is_some() {
-                self.render_config_panel(ui, ctx);
+                // 计算可用高度: 窗口高度 - 已用空间 - 底部按钮区域预留空间
+                let available_height = ui.available_height();
+                let max_config_height = (available_height - 150.0).max(150.0); // 至少150px,最多为可用高度-150px
+
+                egui::ScrollArea::vertical()
+                    .id_source("config_panel_scroll")
+                    .max_height(max_config_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        self.render_config_panel(ui, ctx);
+                    });
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(10.0);
@@ -1465,7 +1496,7 @@ impl eframe::App for InfiniteApp {
                 if !self.game_path.is_empty() {
                     let output_path = format!("{}/Mods/Infinite/Infinite.mpq/data", self.game_path);
                     ui.label(
-                        egui::RichText::new(format!("输出路径: {}", output_path))
+                        egui::RichText::new(format!("输出路径: {}", Self::normalize_path_display(&output_path)))
                             .small()
                             .color(egui::Color32::LIGHT_GRAY),
                     );
