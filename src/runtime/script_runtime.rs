@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 // Re-export UserConfig from mod_manager
 pub use crate::mod_manager::config::UserConfig;
 
+// Re-export TSV types from api
+pub use super::api::{TsvData, TsvRow};
+
 /// Unified script runtime interface
 pub trait ScriptRuntime {
     /// 设置 API（注入全局对象和函数）
@@ -349,83 +352,6 @@ impl ScriptServices {
     fn resolve_output_path(&self, path: &str) -> PathBuf {
         let normalized = path.replace('\\', "/");
         self.output_path.join(&normalized)
-    }
-}
-
-/// TSV 数据结构
-#[derive(Debug, Clone)]
-pub struct TsvData {
-    pub headers: Vec<String>,
-    pub rows: Vec<TsvRow>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TsvRow {
-    pub data: HashMap<String, String>,
-}
-
-impl TsvData {
-    pub fn from_file(path: &Path) -> Result<Self> {
-        // Read file content
-        let content = std::fs::read_to_string(path)?;
-
-        // Use async runtime to call the TSV handler
-        let runtime = tokio::runtime::Runtime::new()?;
-        let rows_data = runtime.block_on(async {
-            crate::handlers::tsv::TsvHandler::read(path).await
-        })?;
-
-        // First row is headers
-        if rows_data.is_empty() {
-            return Ok(Self {
-                headers: Vec::new(),
-                rows: Vec::new(),
-            });
-        }
-
-        let headers = rows_data[0].clone();
-
-        // Convert remaining rows to TsvRow format
-        let rows = rows_data[1..]
-            .iter()
-            .map(|row| {
-                let mut data = HashMap::new();
-                for (i, value) in row.iter().enumerate() {
-                    if let Some(header) = headers.get(i) {
-                        data.insert(header.clone(), value.clone());
-                    }
-                }
-                TsvRow { data }
-            })
-            .collect();
-
-        Ok(Self { headers, rows })
-    }
-
-    pub fn write_to_file(&self, path: &Path) -> Result<()> {
-        // Convert back to TSV handler format
-        let mut data: Vec<Vec<String>> = Vec::new();
-
-        // First row is headers
-        data.push(self.headers.clone());
-
-        // 添加所有行数据
-        for row in &self.rows {
-            let row_data: Vec<String> = self
-                .headers
-                .iter()
-                .map(|header| row.data.get(header).cloned().unwrap_or_default())
-                .collect();
-            data.push(row_data);
-        }
-
-        // 使用异步运行时执行异步写入
-        let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(async {
-            crate::handlers::tsv::TsvHandler::write(path, &data).await
-        })?;
-
-        Ok(())
     }
 }
 

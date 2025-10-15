@@ -53,7 +53,7 @@ rfd = "0.14"  # Native file dialogs
 dirs = "5.0"  # System directory paths
 
 [features]
-default = []
+default = ["js-runtime"]
 js-runtime = ["rquickjs"]
 
 [dev-dependencies]

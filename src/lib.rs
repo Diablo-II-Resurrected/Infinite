@@ -3,7 +3,6 @@ pub mod cli;
 pub mod file_system;
 pub mod github_downloader;
 pub mod handlers;
-pub mod lua_api;
 pub mod mod_manager;
 pub mod mod_sources;
 pub mod runtime;

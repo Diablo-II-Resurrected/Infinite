@@ -38,7 +38,7 @@ pub enum ConfigOption {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "defaultValue")]
         default: bool,
     },
 
@@ -48,7 +48,7 @@ pub enum ConfigOption {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "defaultValue")]
         default: f64,
         #[serde(skip_serializing_if = "Option::is_none")]
         min: Option<f64>,
@@ -62,7 +62,7 @@ pub enum ConfigOption {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
-        #[serde(default)]
+        #[serde(default, alias = "defaultValue")]
         default: String,
     },
 
@@ -72,6 +72,7 @@ pub enum ConfigOption {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        #[serde(alias = "defaultValue")]
         default: String,
         options: Vec<SelectOption>,
     },

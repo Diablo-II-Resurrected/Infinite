@@ -1,4 +1,5 @@
 use super::script_runtime::*;
+use super::api::{InfiniteApiCore, ConsoleApi};
 use anyhow::Result;
 use rquickjs::{Context, Runtime, Value, Function, Object, Array, Ctx};
 use rquickjs::function::Func;
@@ -14,7 +15,7 @@ pub struct JavaScriptRuntime {
     _runtime: Runtime,  // Keep alive but mark as intentionally unused
     context: Context,
     mod_path: PathBuf,
-    services: Arc<ScriptServices>,
+    api_core: Arc<InfiniteApiCore>,
 }
 
 impl JavaScriptRuntime {
@@ -22,18 +23,20 @@ impl JavaScriptRuntime {
         // Create QuickJS runtime
         let runtime = Runtime::new()?;
         let context = Context::full(&runtime)?;
+        let services_arc = Arc::new(services);
+        let api_core = Arc::new(InfiniteApiCore::new(services_arc));
 
         Ok(Self {
             _runtime: runtime,
             context,
             mod_path: mod_path.to_path_buf(),
-            services: Arc::new(services),
+            api_core,
         })
     }
 
     /// Register D2RMM API
     fn register_d2rmm_api(&self) -> Result<()> {
-        let services = Arc::clone(&self.services);
+        let api_core = Arc::clone(&self.api_core);
 
         self.context.with(|ctx| {
             let globals = ctx.globals();
@@ -42,37 +45,39 @@ impl JavaScriptRuntime {
             let d2rmm = Object::new(ctx.clone())?;
 
             // Register readJson
-            self.register_read_json(&d2rmm, ctx.clone(), Arc::clone(&services))?;
+            self.register_read_json(&d2rmm, ctx.clone(), Arc::clone(&api_core))?;
 
             // Register writeJson
-            self.register_write_json(&d2rmm, ctx.clone(), Arc::clone(&services))?;
+            self.register_write_json(&d2rmm, ctx.clone(), Arc::clone(&api_core))?;
 
             // Register readTsv
-            self.register_read_tsv(&d2rmm, ctx.clone(), Arc::clone(&services))?;
+            self.register_read_tsv(&d2rmm, ctx.clone(), Arc::clone(&api_core))?;
 
             // Register writeTsv
-            self.register_write_tsv(&d2rmm, ctx.clone(), Arc::clone(&services))?;
+            self.register_write_tsv(&d2rmm, ctx.clone(), Arc::clone(&api_core))?;
 
             // Register readTxt
-            self.register_read_txt(&d2rmm, ctx.clone(), Arc::clone(&services))?;
+            self.register_read_txt(&d2rmm, ctx.clone(), Arc::clone(&api_core))?;
 
             // Register writeTxt
-            self.register_write_txt(&d2rmm, ctx.clone(), Arc::clone(&services))?;
+            self.register_write_txt(&d2rmm, ctx.clone(), Arc::clone(&api_core))?;
 
             // Register copyFile
-            self.register_copy_file(&d2rmm, ctx.clone(), Arc::clone(&services))?;
+            self.register_copy_file(&d2rmm, ctx.clone(), Arc::clone(&api_core))?;
 
             // Register getVersion
-            d2rmm.set("getVersion", Function::new(ctx.clone(), |_ctx: Ctx| -> rquickjs::Result<f64> {
-                Ok(1.5) // Report version 1.5 for compatibility
+            let api_core_ver = Arc::clone(&api_core);
+            d2rmm.set("getVersion", Function::new(ctx.clone(), move |_ctx: Ctx| -> rquickjs::Result<f64> {
+                Ok(api_core_ver.get_version())
             })?)?;
 
             // Register error - throws an error that stops execution
-            d2rmm.set("error", Function::new(ctx.clone(), |ctx: Ctx, msg: String| -> rquickjs::Result<()> {
-                tracing::error!("[JS MOD ERROR] {}", msg);
+            let api_core_err = Arc::clone(&api_core);
+            d2rmm.set("error", Function::new(ctx.clone(), move |ctx: Ctx, msg: String| -> rquickjs::Result<()> {
+                let _ = api_core_err.throw_error(&msg);
                 // Throw a JavaScript Error
                 let error_ctor: Function = ctx.globals().get("Error")?;
-                let error: Value = error_ctor.call((msg,))?;
+                let _error: Value = error_ctor.call((msg,))?;
                 Err(rquickjs::Error::Exception)
             })?)?;
 
@@ -87,80 +92,65 @@ impl JavaScriptRuntime {
         Ok(())
     }
 
-    fn register_read_json<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, services: Arc<ScriptServices>) -> rquickjs::Result<()> {
+    fn register_read_json<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, api_core: Arc<InfiniteApiCore>) -> rquickjs::Result<()> {
         let func = Func::from(move |ctx: Ctx<'js>, path: String| -> rquickjs::Result<Value<'js>> {
-            tracing::debug!("readJson called with path: {}", path);
-            let json = services.read_json(&path).map_err(|e| {
-                tracing::error!("readJson error: {}", e);
-                to_js_error(e)
-            })?;
-            tracing::debug!("JSON loaded successfully");
-            let result = json_to_rquickjs(ctx, &json).map_err(|e| {
-                tracing::error!("JSON to JS conversion error: {:?}", e);
-                e
-            })?;
-            tracing::debug!("JSON converted to JS successfully");
+            let json = api_core.read_json(&path).map_err(to_js_error)?;
+            let result = json_to_rquickjs(ctx, &json)?;
             Ok(result)
         });
         d2rmm.set("readJson", func)?;
         Ok(())
     }
 
-    fn register_write_json<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, services: Arc<ScriptServices>) -> rquickjs::Result<()> {
+    fn register_write_json<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, api_core: Arc<InfiniteApiCore>) -> rquickjs::Result<()> {
         let func = Func::from(move |ctx: Ctx<'js>, path: String, data: Value<'js>| -> rquickjs::Result<()> {
             let json = rquickjs_to_json(ctx, &data)?;
-            services.write_json(&path, &json).map_err(to_js_error)?;
+            api_core.write_json(&path, &json).map_err(to_js_error)?;
             Ok(())
         });
         d2rmm.set("writeJson", func)?;
         Ok(())
     }
 
-    fn register_read_tsv<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, services: Arc<ScriptServices>) -> rquickjs::Result<()> {
+    fn register_read_tsv<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, api_core: Arc<InfiniteApiCore>) -> rquickjs::Result<()> {
         let func = Func::from(move |ctx: Ctx<'js>, path: String| -> rquickjs::Result<Value<'js>> {
-            tracing::debug!("readTsv called with path: {}", path);
-            let tsv = services.read_tsv(&path).map_err(|e| {
-                tracing::error!("readTsv error: {}", e);
-                to_js_error(e)
-            })?;
-            tracing::debug!("TSV loaded: {} headers, {} rows", tsv.headers.len(), tsv.rows.len());
+            let tsv = api_core.read_tsv(&path).map_err(to_js_error)?;
             let result = tsv_to_rquickjs(ctx, &tsv)?;
-            tracing::debug!("TSV converted to JS successfully");
             Ok(result)
         });
         d2rmm.set("readTsv", func)?;
         Ok(())
     }
 
-    fn register_write_tsv<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, services: Arc<ScriptServices>) -> rquickjs::Result<()> {
+    fn register_write_tsv<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, api_core: Arc<InfiniteApiCore>) -> rquickjs::Result<()> {
         let func = Func::from(move |ctx: Ctx<'js>, path: String, data: Value<'js>| -> rquickjs::Result<()> {
             let tsv = rquickjs_to_tsv(ctx, &data)?;
-            services.write_tsv(&path, &tsv).map_err(to_js_error)?;
+            api_core.write_tsv(&path, &tsv).map_err(to_js_error)?;
             Ok(())
         });
         d2rmm.set("writeTsv", func)?;
         Ok(())
     }
 
-    fn register_read_txt<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, services: Arc<ScriptServices>) -> rquickjs::Result<()> {
+    fn register_read_txt<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, api_core: Arc<InfiniteApiCore>) -> rquickjs::Result<()> {
         let func = Func::from(move |_ctx: Ctx<'js>, path: String| -> rquickjs::Result<String> {
-            services.read_txt(&path).map_err(to_js_error)
+            api_core.read_txt(&path).map_err(to_js_error)
         });
         d2rmm.set("readTxt", func)?;
         Ok(())
     }
 
-    fn register_write_txt<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, services: Arc<ScriptServices>) -> rquickjs::Result<()> {
+    fn register_write_txt<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, api_core: Arc<InfiniteApiCore>) -> rquickjs::Result<()> {
         let func = Func::from(move |_ctx: Ctx<'js>, path: String, content: String| -> rquickjs::Result<()> {
-            services.write_txt(&path, &content).map_err(to_js_error)
+            api_core.write_txt(&path, &content).map_err(to_js_error)
         });
         d2rmm.set("writeTxt", func)?;
         Ok(())
     }
 
-    fn register_copy_file<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, services: Arc<ScriptServices>) -> rquickjs::Result<()> {
+    fn register_copy_file<'js>(&self, d2rmm: &Object<'js>, _ctx: Ctx<'js>, api_core: Arc<InfiniteApiCore>) -> rquickjs::Result<()> {
         let func = Func::from(move |_ctx: Ctx<'js>, src: String, dst: String| -> rquickjs::Result<()> {
-            services.copy_file(&src, &dst, false).map_err(to_js_error)
+            api_core.copy_file(&src, &dst, false).map_err(to_js_error)
         });
         d2rmm.set("copyFile", func)?;
         Ok(())
@@ -174,25 +164,25 @@ impl JavaScriptRuntime {
         // Accept variadic arguments and format them
         console.set("log", Func::from(|ctx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<()> {
             let msg = format_console_args(ctx, &args.0)?;
-            tracing::info!("[JS] {}", msg);
+            ConsoleApi::log(&msg);
             Ok(())
         }))?;
 
         console.set("debug", Func::from(|ctx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<()> {
             let msg = format_console_args(ctx, &args.0)?;
-            tracing::debug!("[JS] {}", msg);
+            ConsoleApi::debug(&msg);
             Ok(())
         }))?;
 
         console.set("warn", Func::from(|ctx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<()> {
             let msg = format_console_args(ctx, &args.0)?;
-            tracing::warn!("[JS] {}", msg);
+            ConsoleApi::warn(&msg);
             Ok(())
         }))?;
 
         console.set("error", Func::from(|ctx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<()> {
             let msg = format_console_args(ctx, &args.0)?;
-            tracing::error!("[JS] {}", msg);
+            ConsoleApi::error(&msg);
             Ok(())
         }))?;
 
