@@ -14,6 +14,14 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
+/// 获取 mod 缓存目录路径
+fn get_cache_dir() -> PathBuf {
+    let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push("infinite");
+    path.push("mod_cache");
+    path
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -73,8 +81,8 @@ async fn install_mods(
     let mod_dirs: Vec<PathBuf> = if let Some(list_path) = mod_list {
         println!("  {}  {}", "Mod List:".bright_white(), list_path);
 
-        // Setup GitHub downloader
-        let cache_dir = PathBuf::from(".mod_cache");
+        // Setup GitHub downloader with user data directory
+        let cache_dir = get_cache_dir();
         let downloader = GitHubDownloader::new(cache_dir);
 
         if clear_cache {

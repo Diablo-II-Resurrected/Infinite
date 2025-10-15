@@ -90,29 +90,33 @@ impl ModLoader {
             .context("Invalid mod directory name")?
             .to_string();
 
+        // 先生成默认配置,然后用 config.json 的值覆盖
+        let mut user_config = config.generate_default_config();
+
         // 尝试加载用户配置文件 config.json
         let user_config_path = mod_path.join("config.json");
-        let user_config = if user_config_path.exists() {
-            // 从 config.json 加载用户配置
+        if user_config_path.exists() {
+            // 从 config.json 加载用户修改的值
             match std::fs::read_to_string(&user_config_path) {
                 Ok(config_str) => {
-                    match serde_json::from_str(&config_str) {
-                        Ok(cfg) => {
-                            println!("Loaded user config from {:?}", user_config_path);
-                            cfg
+                    match serde_json::from_str::<UserConfig>(&config_str) {
+                        Ok(user_overrides) => {
+                            // 用 config.json 中的值覆盖默认值
+                            for (key, value) in user_overrides {
+                                user_config.insert(key, value);
+                            }
+                            tracing::info!("Loaded user config from {:?}", user_config_path);
                         },
                         Err(e) => {
                             eprintln!("Warning: Failed to parse config.json for {}: {}", id, e);
-                            config.generate_default_config()
                         }
                     }
                 },
-                Err(_) => config.generate_default_config(),
+                Err(e) => {
+                    eprintln!("Warning: Failed to read config.json for {}: {}", id, e);
+                }
             }
-        } else {
-            // 如果不存在 config.json，使用默认配置
-            config.generate_default_config()
-        };
+        }
 
         Ok(LoadedMod {
             id,

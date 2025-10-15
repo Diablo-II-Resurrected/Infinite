@@ -47,13 +47,64 @@ struct ModEntry {
 impl ModEntry {
     /// 从路径加载ModConfig
     fn load_config(&self) -> Option<ModConfig> {
-        let mod_json_path = PathBuf::from(&self.path).join("mod.json");
+        let mod_json_path = if self.path.starts_with("github:") {
+            // 解析 GitHub 路径: github:owner/repo:subdir@branch
+            self.resolve_github_path()?.join("mod.json")
+        } else {
+            PathBuf::from(&self.path).join("mod.json")
+        };
+
         if let Ok(content) = std::fs::read_to_string(&mod_json_path) {
             if let Ok(config) = serde_json::from_str(&content) {
                 return Some(config);
             }
         }
         None
+    }
+
+    /// 解析 GitHub 路径到实际的缓存路径
+    /// github:owner/repo:subdir@branch -> <config_dir>/infinite/mod_cache/owner/repo/branch/subdir
+    fn resolve_github_path(&self) -> Option<PathBuf> {
+        if !self.path.starts_with("github:") {
+            return None;
+        }
+
+        // 移除 "github:" 前缀
+        let path = &self.path[7..];
+
+        // 分离分支 (如果有 @)
+        let (path_without_branch, branch) = if let Some(at_pos) = path.rfind('@') {
+            let branch = &path[at_pos + 1..];
+            let path = &path[..at_pos];
+            (path, branch)
+        } else {
+            (path, "main")
+        };
+
+        // 分离子目录 (如果有 :)
+        let (repo, subdir) = if let Some(colon_pos) = path_without_branch.find(':') {
+            let repo = &path_without_branch[..colon_pos];
+            let subdir = &path_without_branch[colon_pos + 1..];
+            (repo, Some(subdir))
+        } else {
+            (path_without_branch, None)
+        };
+
+        // 解析 owner/repo
+        let parts: Vec<&str> = repo.split('/').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+
+        // 构建缓存路径: <config_dir>/infinite/mod_cache/owner/repo/branch/subdir
+        let cache_dir = AppConfig::cache_dir();
+        let mut target_dir = cache_dir.join(parts[0]).join(parts[1]).join(branch);
+
+        if let Some(subdir) = subdir {
+            target_dir = target_dir.join(subdir);
+        }
+
+        Some(target_dir)
     }
 
     /// 初始化用户配置（使用默认值）
@@ -98,11 +149,24 @@ struct AppConfig {
 }
 
 impl AppConfig {
-    /// 获取配置文件路径
-    fn config_path() -> PathBuf {
+    /// 获取数据目录路径
+    fn data_dir() -> PathBuf {
         let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
         path.push("infinite");
+        path
+    }
+
+    /// 获取配置文件路径
+    fn config_path() -> PathBuf {
+        let mut path = Self::data_dir();
         path.push("gui_config.json");
+        path
+    }
+
+    /// 获取 mod 缓存目录路径
+    fn cache_dir() -> PathBuf {
+        let mut path = Self::data_dir();
+        path.push("mod_cache");
         path
     }
 
@@ -321,6 +385,51 @@ impl InfiniteApp {
         }
 
         None
+    }
+
+    /// 解析 GitHub 路径到实际的缓存路径 (静态版本)
+    /// github:owner/repo:subdir@branch -> <config_dir>/infinite/mod_cache/owner/repo/branch/subdir
+    fn resolve_github_path_static(path: &str) -> Option<PathBuf> {
+        if !path.starts_with("github:") {
+            return None;
+        }
+
+        // 移除 "github:" 前缀
+        let path = &path[7..];
+
+        // 分离分支 (如果有 @)
+        let (path_without_branch, branch) = if let Some(at_pos) = path.rfind('@') {
+            let branch = &path[at_pos + 1..];
+            let path = &path[..at_pos];
+            (path, branch)
+        } else {
+            (path, "main")
+        };
+
+        // 分离子目录 (如果有 :)
+        let (repo, subdir) = if let Some(colon_pos) = path_without_branch.find(':') {
+            let repo = &path_without_branch[..colon_pos];
+            let subdir = &path_without_branch[colon_pos + 1..];
+            (repo, Some(subdir))
+        } else {
+            (path_without_branch, None)
+        };
+
+        // 解析 owner/repo
+        let parts: Vec<&str> = repo.split('/').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+
+        // 构建缓存路径: <config_dir>/infinite/mod_cache/owner/repo/branch/subdir
+        let cache_dir = AppConfig::cache_dir();
+        let mut target_dir = cache_dir.join(parts[0]).join(parts[1]).join(branch);
+
+        if let Some(subdir) = subdir {
+            target_dir = target_dir.join(subdir);
+        }
+
+        Some(target_dir)
     }
 
     fn fetch_github_info(&mut self, ctx: egui::Context) {
@@ -790,14 +899,51 @@ impl InfiniteApp {
                 return;
             }
 
-            // 保存每个mod的用户配置到mod目录
+            // 创建临时配置映射文件 (用于 GitHub mod 的配置)
+            let temp_config = std::env::temp_dir().join("infinite_gui_config.json");
+            let config_map: HashMap<String, HashMap<String, serde_json::Value>> = enabled_mods
+                .iter()
+                .filter(|(path, config)| !config.is_empty())
+                .map(|(path, config)| (path.clone(), config.clone()))
+                .collect();
+            if let Ok(config_json) = serde_json::to_string_pretty(&config_map) {
+                let _ = std::fs::write(&temp_config, config_json);
+            }
+
+            // 保存每个mod的用户配置到mod目录 (仅限本地 mod 和已下载的 GitHub mod)
             for (mod_path, user_config) in &enabled_mods {
                 if !user_config.is_empty() {
-                    // 直接保存到mod目录的config.json
-                    let config_file = PathBuf::from(mod_path).join("config.json");
-                    if let Ok(config_json) = serde_json::to_string_pretty(user_config) {
-                        if let Err(e) = std::fs::write(&config_file, config_json) {
-                            eprintln!("Warning: Failed to write config for {}: {}", mod_path, e);
+                    // 解析路径(支持GitHub路径)
+                    let config_dir = if mod_path.starts_with("github:") {
+                        // 解析 GitHub 路径到缓存目录
+                        Self::resolve_github_path_static(mod_path)
+                    } else {
+                        Some(PathBuf::from(mod_path))
+                    };
+
+                    if let Some(dir) = config_dir {
+                        // 检查目录是否存在,如果是 GitHub mod 且目录不存在,跳过保存
+                        // (CLI 会在下载 mod 后处理配置)
+                        if !dir.exists() {
+                            if mod_path.starts_with("github:") {
+                                println!("⏭ Skipping config save for {}: mod not downloaded yet", mod_path);
+                                continue;
+                            }
+                        }
+
+                        let config_file = dir.join("config.json");
+                        if let Ok(config_json) = serde_json::to_string_pretty(user_config) {
+                            // 确保目录存在
+                            if let Err(e) = std::fs::create_dir_all(&dir) {
+                                eprintln!("Warning: Failed to create directory for {}: {}", mod_path, e);
+                                continue;
+                            }
+
+                            if let Err(e) = std::fs::write(&config_file, config_json) {
+                                eprintln!("Warning: Failed to write config for {}: {}", mod_path, e);
+                            } else {
+                                println!("✓ Saved config to: {}", config_file.display());
+                            }
                         }
                     }
                 }
@@ -828,18 +974,42 @@ impl InfiniteApp {
                     "--game-path",
                     &game_path,
                     "--mod-list",
-                    temp_list.to_str().unwrap(),
-                    "--clear-cache"
+                    temp_list.to_str().unwrap()
                 ])
                 .output();
 
             // 清理临时文件
             let _ = std::fs::remove_file(&temp_list);
+            let temp_config = std::env::temp_dir().join("infinite_gui_config.json");
+            let _ = std::fs::remove_file(&temp_config);
 
             match result {
                 Ok(output) => {
                     if output.status.success() {
                         *status_msg.lock().unwrap() = format!("✅ 成功生成到: {}", output_path);
+
+                        // 成功后删除临时的 config.json 文件
+                        for (mod_path, user_config) in &enabled_mods {
+                            if !user_config.is_empty() {
+                                let config_dir = if mod_path.starts_with("github:") {
+                                    Self::resolve_github_path_static(mod_path)
+                                } else {
+                                    Some(PathBuf::from(mod_path))
+                                };
+
+                                if let Some(dir) = config_dir {
+                                    let config_file = dir.join("config.json");
+                                    // 只删除存在的文件
+                                    if config_file.exists() {
+                                        if let Err(e) = std::fs::remove_file(&config_file) {
+                                            eprintln!("Warning: Failed to delete config.json for {}: {}", mod_path, e);
+                                        } else {
+                                            println!("🗑 Deleted temporary config: {}", config_file.display());
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         let stderr = String::from_utf8_lossy(&output.stderr);
                         *status_msg.lock().unwrap() = format!("❌ 生成失败: {}", stderr);
