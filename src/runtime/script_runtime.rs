@@ -325,34 +325,6 @@ impl ScriptServices {
 
         Ok(())
     }
-
-    /// 解析路径（从游戏目录或输出目录读取）
-    fn resolve_path(&self, path: &str) -> PathBuf {
-        let normalized = path.replace('\\', "/");
-
-        tracing::debug!("Resolving path: {} -> {}", path, normalized);
-        tracing::debug!("Output path: {:?}", self.output_path);
-        tracing::debug!("Game path: {:?}", self.game_path);
-
-        // 先尝试输出目录
-        let output_path = self.output_path.join(&normalized);
-        tracing::debug!("Checking output_path: {:?}", output_path);
-        if output_path.exists() {
-            tracing::debug!("Found in output path");
-            return output_path;
-        }
-
-        // 再尝试游戏目录
-        let game_full_path = self.game_path.join(&normalized);
-        tracing::debug!("Checking game_path: {:?}", game_full_path);
-        game_full_path
-    }
-
-    /// 解析输出路径
-    fn resolve_output_path(&self, path: &str) -> PathBuf {
-        let normalized = path.replace('\\', "/");
-        self.output_path.join(&normalized)
-    }
 }
 
 /// 递归复制目录

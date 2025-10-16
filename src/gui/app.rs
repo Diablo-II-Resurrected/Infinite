@@ -5,6 +5,60 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// GitHub 路径解析结果
+struct GitHubPath {
+    repo: String,
+    subdir: Option<String>,
+    branch: Option<String>,
+}
+
+impl GitHubPath {
+    /// 从 github:owner/repo:subdir@branch 格式解析
+    fn parse(path: &str) -> Option<Self> {
+        if !path.starts_with("github:") {
+            return None;
+        }
+
+        let path_str = &path[7..]; // 移除 "github:" 前缀
+
+        // 分离分支 (如果有 @)
+        let (path_without_branch, branch) = if let Some(at_pos) = path_str.rfind('@') {
+            (&path_str[..at_pos], Some(path_str[at_pos + 1..].to_string()))
+        } else {
+            (path_str, None)
+        };
+
+        // 分离子目录 (如果有 :)
+        let (repo, subdir) = if let Some(colon_pos) = path_without_branch.find(':') {
+            (
+                &path_without_branch[..colon_pos],
+                Some(path_without_branch[colon_pos + 1..].to_string()),
+            )
+        } else {
+            (path_without_branch, None)
+        };
+
+        Some(Self {
+            repo: repo.to_string(),
+            subdir,
+            branch,
+        })
+    }
+
+    /// 获取缓存目录路径
+    fn cache_path(&self) -> PathBuf {
+        let cache_dir = AppConfig::cache_dir();
+        let parts: Vec<&str> = self.repo.split('/').collect();
+        let branch = self.branch.as_deref().unwrap_or("main");
+
+        let mut path = cache_dir.join(parts[0]).join(parts[1]).join(branch);
+        if let Some(ref subdir) = self.subdir {
+            path = path.join(subdir);
+        }
+        path
+    }
+}
+
 /// GUI应用状态
 pub struct InfiniteApp {
     // 游戏路径
@@ -55,6 +109,7 @@ enum ConfigLoadState {
     NotLoaded,
     Loading,
     Loaded(ModConfig),
+    #[allow(dead_code)] // 保留错误信息用于将来的错误显示
     Failed(String),
 }
 
@@ -139,25 +194,23 @@ impl ModEntry {
         // 在后台线程中执行
         std::thread::spawn(move || {
             // 解析 GitHub 路径
-            let path_str = &path[7..];
-            let (path_without_branch, branch_opt) = if let Some(at_pos) = path_str.rfind('@') {
-                (&path_str[..at_pos], Some(&path_str[at_pos + 1..]))
-            } else {
-                (path_str, None)
-            };
-
-            let (repo, subdir) = if let Some(colon_pos) = path_without_branch.find(':') {
-                (&path_without_branch[..colon_pos], Some(&path_without_branch[colon_pos + 1..]))
-            } else {
-                (path_without_branch, None)
+            let gh_path = match GitHubPath::parse(&path) {
+                Some(p) => p,
+                None => {
+                    *config_state.lock().unwrap() = ConfigLoadState::Failed("Invalid GitHub path".to_string());
+                    if let Some(ctx) = ctx {
+                        ctx.request_repaint();
+                    }
+                    return;
+                }
             };
 
             // 如果没有指定分支,先获取仓库的默认分支
-            let branch = if let Some(b) = branch_opt {
-                b.to_string()
+            let branch = if let Some(b) = gh_path.branch {
+                b
             } else {
                 // 查询仓库信息获取默认分支
-                let repo_url = format!("https://api.github.com/repos/{}", repo);
+                let repo_url = format!("https://api.github.com/repos/{}", gh_path.repo);
                 let mut repo_request = reqwest::blocking::Client::new()
                     .get(&repo_url)
                     .header("User-Agent", "infinite-mod-manager");
@@ -187,7 +240,7 @@ impl ModEntry {
             };
 
             // 构建 GitHub API URL
-            let file_path = if let Some(subdir) = subdir {
+            let file_path = if let Some(subdir) = gh_path.subdir {
                 format!("{}/mod.json", subdir)
             } else {
                 "mod.json".to_string()
@@ -195,7 +248,7 @@ impl ModEntry {
 
             let url = format!(
                 "https://api.github.com/repos/{}/contents/{}?ref={}",
-                repo, file_path, branch
+                gh_path.repo, file_path, branch
             );
 
             // 构建请求
@@ -264,48 +317,8 @@ impl ModEntry {
     }
 
     /// 解析 GitHub 路径到实际的缓存路径
-    /// github:owner/repo:subdir@branch -> <config_dir>/infinite/mod_cache/owner/repo/branch/subdir
     fn resolve_github_path(&self) -> Option<PathBuf> {
-        if !self.path.starts_with("github:") {
-            return None;
-        }
-
-        // 移除 "github:" 前缀
-        let path = &self.path[7..];
-
-        // 分离分支 (如果有 @)
-        let (path_without_branch, branch) = if let Some(at_pos) = path.rfind('@') {
-            let branch = &path[at_pos + 1..];
-            let path = &path[..at_pos];
-            (path, branch)
-        } else {
-            (path, "main")
-        };
-
-        // 分离子目录 (如果有 :)
-        let (repo, subdir) = if let Some(colon_pos) = path_without_branch.find(':') {
-            let repo = &path_without_branch[..colon_pos];
-            let subdir = &path_without_branch[colon_pos + 1..];
-            (repo, Some(subdir))
-        } else {
-            (path_without_branch, None)
-        };
-
-        // 解析 owner/repo
-        let parts: Vec<&str> = repo.split('/').collect();
-        if parts.len() != 2 {
-            return None;
-        }
-
-        // 构建缓存路径: <config_dir>/infinite/mod_cache/owner/repo/branch/subdir
-        let cache_dir = AppConfig::cache_dir();
-        let mut target_dir = cache_dir.join(parts[0]).join(parts[1]).join(branch);
-
-        if let Some(subdir) = subdir {
-            target_dir = target_dir.join(subdir);
-        }
-
-        Some(target_dir)
+        GitHubPath::parse(&self.path).map(|gh| gh.cache_path())
     }
 
     /// 初始化用户配置（使用默认值）
@@ -338,11 +351,6 @@ impl ModEntry {
                 }
             }
         }
-    }
-
-    /// 生成用户配置的JSON
-    fn generate_user_config_json(&self) -> serde_json::Value {
-        serde_json::to_value(&self.user_config).unwrap_or(serde_json::json!({}))
     }
 }
 
@@ -610,51 +618,6 @@ impl InfiniteApp {
         }
 
         None
-    }
-
-    /// 解析 GitHub 路径到实际的缓存路径 (静态版本)
-    /// github:owner/repo:subdir@branch -> <config_dir>/infinite/mod_cache/owner/repo/branch/subdir
-    fn resolve_github_path_static(path: &str) -> Option<PathBuf> {
-        if !path.starts_with("github:") {
-            return None;
-        }
-
-        // 移除 "github:" 前缀
-        let path = &path[7..];
-
-        // 分离分支 (如果有 @)
-        let (path_without_branch, branch) = if let Some(at_pos) = path.rfind('@') {
-            let branch = &path[at_pos + 1..];
-            let path = &path[..at_pos];
-            (path, branch)
-        } else {
-            (path, "main")
-        };
-
-        // 分离子目录 (如果有 :)
-        let (repo, subdir) = if let Some(colon_pos) = path_without_branch.find(':') {
-            let repo = &path_without_branch[..colon_pos];
-            let subdir = &path_without_branch[colon_pos + 1..];
-            (repo, Some(subdir))
-        } else {
-            (path_without_branch, None)
-        };
-
-        // 解析 owner/repo
-        let parts: Vec<&str> = repo.split('/').collect();
-        if parts.len() != 2 {
-            return None;
-        }
-
-        // 构建缓存路径: <config_dir>/infinite/mod_cache/owner/repo/branch/subdir
-        let cache_dir = AppConfig::cache_dir();
-        let mut target_dir = cache_dir.join(parts[0]).join(parts[1]).join(branch);
-
-        if let Some(subdir) = subdir {
-            target_dir = target_dir.join(subdir);
-        }
-
-        Some(target_dir)
     }
 
     fn fetch_github_info(&mut self, ctx: egui::Context) {
