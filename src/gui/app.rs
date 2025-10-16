@@ -140,16 +140,50 @@ impl ModEntry {
         std::thread::spawn(move || {
             // 解析 GitHub 路径
             let path_str = &path[7..];
-            let (path_without_branch, branch) = if let Some(at_pos) = path_str.rfind('@') {
-                (&path_str[..at_pos], &path_str[at_pos + 1..])
+            let (path_without_branch, branch_opt) = if let Some(at_pos) = path_str.rfind('@') {
+                (&path_str[..at_pos], Some(&path_str[at_pos + 1..]))
             } else {
-                (path_str, "main")
+                (path_str, None)
             };
 
             let (repo, subdir) = if let Some(colon_pos) = path_without_branch.find(':') {
                 (&path_without_branch[..colon_pos], Some(&path_without_branch[colon_pos + 1..]))
             } else {
                 (path_without_branch, None)
+            };
+
+            // 如果没有指定分支,先获取仓库的默认分支
+            let branch = if let Some(b) = branch_opt {
+                b.to_string()
+            } else {
+                // 查询仓库信息获取默认分支
+                let repo_url = format!("https://api.github.com/repos/{}", repo);
+                let mut repo_request = reqwest::blocking::Client::new()
+                    .get(&repo_url)
+                    .header("User-Agent", "infinite-mod-manager");
+                
+                if let Some(ref token) = github_token {
+                    repo_request = repo_request.header("Authorization", format!("Bearer {}", token));
+                }
+
+                match repo_request.send() {
+                    Ok(response) if response.status().is_success() => {
+                        if let Ok(repo_info) = response.json::<serde_json::Value>() {
+                            repo_info
+                                .get("default_branch")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "main".to_string())
+                        } else {
+                            "main".to_string()
+                        }
+                    }
+                    _ => {
+                        // 如果获取失败,回退到 main
+                        eprintln!("⚠️ Failed to get default branch, trying 'main'");
+                        "main".to_string()
+                    }
+                }
             };
 
             // 构建 GitHub API URL

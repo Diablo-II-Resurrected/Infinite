@@ -44,7 +44,13 @@ impl GitHubDownloader {
         subdir: Option<&str>,
         branch: Option<&str>,
     ) -> Result<PathBuf> {
-        let branch = branch.unwrap_or("main");
+        // Get the actual branch to use
+        let branch = if let Some(b) = branch {
+            b.to_string()
+        } else {
+            // Query repository info to get default branch
+            self.get_default_branch(repo).await?
+        };
 
         // Create cache directory structure: cache_dir/owner/repo/branch/subdir
         let parts: Vec<&str> = repo.split('/').collect();
@@ -55,7 +61,7 @@ impl GitHubDownloader {
         let owner = parts[0];
         let repo_name = parts[1];
 
-        let mut target_dir = self.cache_dir.join(owner).join(repo_name).join(branch);
+        let mut target_dir = self.cache_dir.join(owner).join(repo_name).join(&branch);
         if let Some(subdir) = subdir {
             target_dir = target_dir.join(subdir);
         }
@@ -73,11 +79,49 @@ impl GitHubDownloader {
 
         // Download using GitHub API
         let base_path = subdir.unwrap_or("");
-        self.download_directory(owner, repo_name, branch, base_path, &target_dir)
+        self.download_directory(owner, repo_name, &branch, base_path, &target_dir)
             .await
             .context("Failed to download from GitHub")?;
 
         Ok(target_dir)
+    }
+
+    /// Get the default branch of a repository
+    async fn get_default_branch(&self, repo: &str) -> Result<String> {
+        let url = format!("https://api.github.com/repos/{}", repo);
+        
+        let mut request = self.client
+            .get(&url)
+            .header("User-Agent", "infinite-mod-manager");
+
+        if let Some(ref token) = self.github_token {
+            request = request.header("Authorization", format!("Bearer {}", token));
+        }
+
+        let response = request
+            .send()
+            .await
+            .context("Failed to fetch repository info")?;
+
+        if !response.status().is_success() {
+            tracing::warn!("Failed to get default branch for {}, falling back to 'main'", repo);
+            return Ok("main".to_string());
+        }
+
+        let repo_info: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse repository info")?;
+
+        let default_branch = repo_info
+            .get("default_branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("main")
+            .to_string();
+
+        tracing::info!("Detected default branch for {}: {}", repo, default_branch);
+        
+        Ok(default_branch)
     }
 
     /// Download a directory from GitHub using the API
