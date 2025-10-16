@@ -161,7 +161,7 @@ impl ModEntry {
                 let mut repo_request = reqwest::blocking::Client::new()
                     .get(&repo_url)
                     .header("User-Agent", "infinite-mod-manager");
-                
+
                 if let Some(ref token) = github_token {
                     repo_request = repo_request.header("Authorization", format!("Bearer {}", token));
                 }
@@ -325,6 +325,10 @@ impl ModEntry {
                     }
                     infinite::mod_manager::config::ConfigOption::Select { id, default, .. } => {
                         (id.clone(), serde_json::json!(default))
+                    }
+                    infinite::mod_manager::config::ConfigOption::Section { .. } => {
+                        // Section 不需要存储值，跳过
+                        continue;
                     }
                 };
 
@@ -929,6 +933,17 @@ impl InfiniteApp {
 
                         for option in &config_options {
                                     match option {
+                                        infinite::mod_manager::config::ConfigOption::Section {
+                                            name,
+                                            ..
+                                        } => {
+                                            // 渲染分节标题
+                                            ui.add_space(10.0);
+                                            ui.separator();
+                                            ui.heading(egui::RichText::new(name).strong());
+                                            ui.add_space(8.0);
+                                        }
+
                                         infinite::mod_manager::config::ConfigOption::CheckBox {
                                             id,
                                             name,
@@ -1150,144 +1165,38 @@ impl InfiniteApp {
         let progress = self.progress.clone();
         let github_token = self.github_token.clone();
 
-        // 在新线程中运行
+        // 在新线程中运行(使用tokio runtime)
         std::thread::spawn(move || {
-            // 创建临时mod列表文件
-            let temp_list = std::env::temp_dir().join("infinite_gui_mods.txt");
-            let mod_paths: Vec<String> =
-                enabled_mods.iter().map(|(path, _)| path.clone()).collect();
-            if let Err(e) = std::fs::write(&temp_list, mod_paths.join("\n")) {
-                *status_msg.lock().unwrap() = format!("❌ 无法创建临时文件: {}", e);
-                *is_proc.lock().unwrap() = false;
-                *progress.lock().unwrap() = None;
-                ctx.request_repaint();
-                return;
-            }
-
-            // 创建临时配置映射文件 (用于 GitHub mod 的配置)
-            let temp_config = std::env::temp_dir().join("infinite_gui_config.json");
-            let config_map: HashMap<String, HashMap<String, serde_json::Value>> = enabled_mods
-                .iter()
-                .filter(|(path, config)| !config.is_empty())
-                .map(|(path, config)| (path.clone(), config.clone()))
-                .collect();
-            if let Ok(config_json) = serde_json::to_string_pretty(&config_map) {
-                let _ = std::fs::write(&temp_config, config_json);
-            }
-
-            // 保存每个mod的用户配置到mod目录 (仅限本地 mod 和已下载的 GitHub mod)
-            for (mod_path, user_config) in &enabled_mods {
-                if !user_config.is_empty() {
-                    // 解析路径(支持GitHub路径)
-                    let config_dir = if mod_path.starts_with("github:") {
-                        // 解析 GitHub 路径到缓存目录
-                        Self::resolve_github_path_static(mod_path)
-                    } else {
-                        Some(PathBuf::from(mod_path))
-                    };
-
-                    if let Some(dir) = config_dir {
-                        // 检查目录是否存在,如果是 GitHub mod 且目录不存在,跳过保存
-                        // (CLI 会在下载 mod 后处理配置)
-                        if !dir.exists() {
-                            if mod_path.starts_with("github:") {
-                                println!("⏭ Skipping config save for {}: mod not downloaded yet", mod_path);
-                                continue;
-                            }
-                        }
-
-                        let config_file = dir.join("config.json");
-                        if let Ok(config_json) = serde_json::to_string_pretty(user_config) {
-                            // 确保目录存在
-                            if let Err(e) = std::fs::create_dir_all(&dir) {
-                                eprintln!("Warning: Failed to create directory for {}: {}", mod_path, e);
-                                continue;
-                            }
-
-                            if let Err(e) = std::fs::write(&config_file, config_json) {
-                                eprintln!("Warning: Failed to write config for {}: {}", mod_path, e);
-                            } else {
-                                println!("✓ Saved config to: {}", config_file.display());
-                            }
-                        }
-                    }
+            // 创建一个新的tokio runtime用于异步操作
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    *status_msg.lock().unwrap() = format!("❌ 无法创建运行时: {}", e);
+                    *is_proc.lock().unwrap() = false;
+                    *progress.lock().unwrap() = None;
+                    ctx.request_repaint();
+                    return;
                 }
-            }
-
-            *progress.lock().unwrap() = Some("正在处理mods...".to_string());
-            ctx.request_repaint();
-
-            // 查找infinite CLI可执行文件
-            let cli_exe = if let Ok(current_exe) = std::env::current_exe() {
-                // 尝试在同一目录下查找infinite.exe
-                let exe_dir = current_exe.parent().unwrap();
-                let infinite_exe = exe_dir.join("infinite.exe");
-                if infinite_exe.exists() {
-                    infinite_exe
-                } else {
-                    // 如果找不到，尝试使用PATH中的infinite命令
-                    std::path::PathBuf::from("infinite")
-                }
-            } else {
-                std::path::PathBuf::from("infinite")
             };
 
-            // 调用infinite CLI（不指定output-path，使用默认路径）
-            let mut command = std::process::Command::new(&cli_exe);
-            command.args(&[
-                "install",
-                "--game-path",
-                &game_path,
-                "--mod-list",
-                temp_list.to_str().unwrap()
-            ]);
-
-            // 如果有 GitHub token,通过环境变量传递给 CLI
-            if let Some(token) = github_token {
-                command.env("GITHUB_TOKEN", token);
-            }
-
-            let result = command.output();
-
-            // 清理临时文件
-            let _ = std::fs::remove_file(&temp_list);
-            let temp_config = std::env::temp_dir().join("infinite_gui_config.json");
-            let _ = std::fs::remove_file(&temp_config);
+            // 执行异步mod安装
+            let result = rt.block_on(async {
+                Self::install_mods_internal(
+                    &game_path,
+                    &output_path,
+                    enabled_mods,
+                    github_token,
+                    progress.clone(),
+                    ctx.clone(),
+                ).await
+            });
 
             match result {
-                Ok(output) => {
-                    if output.status.success() {
-                        *status_msg.lock().unwrap() = format!("✅ 成功生成到: {}", output_path);
-
-                        // 成功后删除临时的 config.json 文件
-                        for (mod_path, user_config) in &enabled_mods {
-                            if !user_config.is_empty() {
-                                let config_dir = if mod_path.starts_with("github:") {
-                                    Self::resolve_github_path_static(mod_path)
-                                } else {
-                                    Some(PathBuf::from(mod_path))
-                                };
-
-                                if let Some(dir) = config_dir {
-                                    let config_file = dir.join("config.json");
-                                    // 只删除存在的文件
-                                    if config_file.exists() {
-                                        if let Err(e) = std::fs::remove_file(&config_file) {
-                                            eprintln!("Warning: Failed to delete config.json for {}: {}", mod_path, e);
-                                        } else {
-                                            println!("🗑 Deleted temporary config: {}", config_file.display());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        *status_msg.lock().unwrap() = format!("❌ 生成失败: {}", stderr);
-                    }
+                Ok(_) => {
+                    *status_msg.lock().unwrap() = format!("✅ 成功生成到: {}", output_path);
                 }
                 Err(e) => {
-                    *status_msg.lock().unwrap() = format!("❌ 无法执行命令: {}", e);
+                    *status_msg.lock().unwrap() = format!("❌ 生成失败: {}", e);
                 }
             }
 
@@ -1295,6 +1204,172 @@ impl InfiniteApp {
             *progress.lock().unwrap() = None;
             ctx.request_repaint();
         });
+    }
+
+    /// 内部mod安装函数(直接调用库代码)
+    async fn install_mods_internal(
+        game_path: &str,
+        output_path: &str,
+        enabled_mods: Vec<(String, HashMap<String, serde_json::Value>)>,
+        github_token: Option<String>,
+        progress: Arc<Mutex<Option<String>>>,
+        ctx: egui::Context,
+    ) -> anyhow::Result<()> {
+        use infinite::{GitHubDownloader, ModSource, Context as ModContext};
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        *progress.lock().unwrap() = Some("解析mod源...".to_string());
+        ctx.request_repaint();
+
+        // 设置GitHub token到环境变量(供GitHubDownloader使用)
+        if let Some(token) = github_token {
+            std::env::set_var("GITHUB_TOKEN", token);
+        }
+
+        // 解析mod源
+        let mut mod_sources = Vec::new();
+        for (path, _) in &enabled_mods {
+            match ModSource::parse(path) {
+                Ok(source) => mod_sources.push(source),
+                Err(e) => {
+                    eprintln!("Warning: Failed to parse mod source {}: {}", path, e);
+                }
+            }
+        }
+
+        // 下载GitHub mods并收集本地路径
+        let cache_dir = AppConfig::cache_dir();
+        let downloader = GitHubDownloader::new(cache_dir);
+        let mut mod_dirs = Vec::new();
+
+        for (idx, source) in mod_sources.iter().enumerate() {
+            *progress.lock().unwrap() = Some(format!("处理mod {}/{}...", idx + 1, mod_sources.len()));
+            ctx.request_repaint();
+
+            match source {
+                ModSource::Local { path } => {
+                    mod_dirs.push(path.clone());
+                }
+                ModSource::GitHub { repo, subdir, branch } => {
+                    println!("⬇️ Downloading from GitHub: {}", repo);
+                    let local_path = downloader
+                        .download(repo, subdir.as_deref(), branch.as_deref())
+                        .await?;
+
+                    // 应用用户配置
+                    let mut github_path = format!("github:{}", repo);
+                    if let Some(subdir) = subdir {
+                        github_path = format!("{}:{}", github_path, subdir);
+                    }
+                    if let Some(branch) = branch {
+                        if branch != "main" && branch != "master" {
+                            github_path = format!("{}@{}", github_path, branch);
+                        }
+                    }
+
+                    // 查找并应用用户配置
+                    if let Some((_, user_config)) = enabled_mods.iter().find(|(p, _)| p == &github_path) {
+                        if !user_config.is_empty() {
+                            let config_file = local_path.join("config.json");
+                            if let Ok(config_json) = serde_json::to_string_pretty(user_config) {
+                                let _ = std::fs::write(&config_file, config_json);
+                            }
+                        }
+                    }
+
+                    mod_dirs.push(local_path);
+                }
+            }
+        }
+
+        *progress.lock().unwrap() = Some("加载mods...".to_string());
+        ctx.request_repaint();
+
+        // 加载所有mods
+        let mut all_mods = Vec::new();
+        for mod_dir in &mod_dirs {
+            let config_path = mod_dir.join("mod.json");
+            if config_path.exists() {
+                let loader = infinite::ModLoader::new(mod_dir.parent().unwrap_or(&PathBuf::from(".")));
+                match loader.load_mod(mod_dir) {
+                    Ok(mod_data) => all_mods.push(mod_data),
+                    Err(e) => eprintln!("Warning: Failed to load mod at {:?}: {}", mod_dir, e),
+                }
+            } else {
+                let loader = infinite::ModLoader::new(mod_dir);
+                match loader.load_all() {
+                    Ok(mods) => all_mods.extend(mods),
+                    Err(e) => eprintln!("Warning: Failed to load mods from {:?}: {}", mod_dir, e),
+                }
+            }
+        }
+
+        if all_mods.is_empty() {
+            anyhow::bail!("No mods found!");
+        }
+
+        println!("📦 Found {} mod(s)", all_mods.len());
+
+        *progress.lock().unwrap() = Some("清理输出目录...".to_string());
+        ctx.request_repaint();
+
+        // 清理输出目录
+        let output_path_buf = PathBuf::from(output_path);
+        if output_path_buf.exists() {
+            std::fs::remove_dir_all(&output_path_buf)?;
+        }
+
+        // 创建文件管理器
+        let mut file_manager = infinite::FileManager::new();
+        file_manager.set_output_path(output_path);
+        file_manager.set_game_path(game_path);
+
+        // 尝试打开CASC存储
+        match infinite::CascStorage::open(game_path) {
+            Ok(casc) => {
+                println!("✅ CASC storage opened successfully");
+                file_manager.set_casc_storage(Arc::new(casc));
+            }
+            Err(e) => {
+                eprintln!("⚠️ Failed to open CASC storage: {}", e);
+            }
+        }
+
+        let file_manager = Arc::new(RwLock::new(file_manager));
+
+        // 安装每个mod
+        for (idx, mod_data) in all_mods.iter().enumerate() {
+            *progress.lock().unwrap() = Some(format!("安装mod {}/{}...", idx + 1, all_mods.len()));
+            ctx.request_repaint();
+
+            println!("⚙️ Installing: {} v{}", mod_data.config.name, mod_data.config.version);
+
+            // 创建执行上下文
+            let context = Arc::new(ModContext {
+                mod_id: mod_data.id.clone(),
+                mod_path: mod_data.path.clone(),
+                config: serde_json::to_value(&mod_data.user_config)?,
+                file_manager: file_manager.clone(),
+                game_path: game_path.into(),
+                output_path: output_path.into(),
+                dry_run: false,
+            });
+
+            // 执行mod
+            match infinite::ModExecutor::execute_mod(mod_data, context).await {
+                Ok(_) => {
+                    println!("   ✅ Installed successfully");
+                }
+                Err(e) => {
+                    eprintln!("   ❌ Failed: {}", e);
+                }
+            }
+        }
+
+        println!("✅ All mods installed successfully!");
+
+        Ok(())
     }
 }
 

@@ -1,3 +1,6 @@
+// 在 release 模式下禁用控制台窗口
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 
 use eframe::egui;

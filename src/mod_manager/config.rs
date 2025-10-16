@@ -50,9 +50,9 @@ pub enum ConfigOption {
         description: Option<String>,
         #[serde(default, alias = "defaultValue")]
         default: f64,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none", alias = "minValue")]
         min: Option<f64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none", alias = "maxValue")]
         max: Option<f64>,
     },
 
@@ -76,6 +76,14 @@ pub enum ConfigOption {
         default: String,
         options: Vec<SelectOption>,
     },
+
+    /// Section header (for UI organization, no value)
+    Section {
+        id: String,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none", alias = "defaultExpanded")]
+        default_expanded: Option<bool>,
+    },
 }
 
 /// Option for select dropdown
@@ -89,13 +97,14 @@ pub struct SelectOption {
 pub type UserConfig = HashMap<String, serde_json::Value>;
 
 impl ConfigOption {
-    /// Get the default value for this config option
-    pub fn get_default_value(&self) -> serde_json::Value {
+    /// Get the default value for this config option (returns None for Section)
+    pub fn get_default_value(&self) -> Option<serde_json::Value> {
         match self {
-            ConfigOption::CheckBox { default, .. } => serde_json::json!(default),
-            ConfigOption::Number { default, .. } => serde_json::json!(default),
-            ConfigOption::Text { default, .. } => serde_json::json!(default),
-            ConfigOption::Select { default, .. } => serde_json::json!(default),
+            ConfigOption::CheckBox { default, .. } => Some(serde_json::json!(default)),
+            ConfigOption::Number { default, .. } => Some(serde_json::json!(default)),
+            ConfigOption::Text { default, .. } => Some(serde_json::json!(default)),
+            ConfigOption::Select { default, .. } => Some(serde_json::json!(default)),
+            ConfigOption::Section { .. } => None, // Sections don't have values
         }
     }
 
@@ -106,6 +115,7 @@ impl ConfigOption {
             ConfigOption::Number { id, .. } => id,
             ConfigOption::Text { id, .. } => id,
             ConfigOption::Select { id, .. } => id,
+            ConfigOption::Section { id, .. } => id,
         }
     }
 }
@@ -116,7 +126,10 @@ impl ModConfig {
         let mut config = UserConfig::new();
 
         for option in &self.config {
-            config.insert(option.id().to_string(), option.get_default_value());
+            // Only add options that have values (skip sections)
+            if let Some(value) = option.get_default_value() {
+                config.insert(option.id().to_string(), value);
+            }
         }
 
         config

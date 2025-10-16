@@ -89,7 +89,7 @@ impl GitHubDownloader {
     /// Get the default branch of a repository
     async fn get_default_branch(&self, repo: &str) -> Result<String> {
         let url = format!("https://api.github.com/repos/{}", repo);
-        
+
         let mut request = self.client
             .get(&url)
             .header("User-Agent", "infinite-mod-manager");
@@ -120,7 +120,7 @@ impl GitHubDownloader {
             .to_string();
 
         tracing::info!("Detected default branch for {}: {}", repo, default_branch);
-        
+
         Ok(default_branch)
     }
 
